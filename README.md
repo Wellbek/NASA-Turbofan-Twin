@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project combines **predictive maintenance** (using NASA’s CMAPSS turbofan simulator) with **demand forecasting** (retail/manufacturing time-series + external macro indicators). The aim is to build end-to-end pipelines — from raw data ingestion to survival analysis, machine learning, and deep learning models — and deploy an interactive **Streamlit dashboard** showcasing results.
+This project combines **predictive maintenance** (using NASA’s CMAPSS turbofan simulator) with **demand forecasting** (retail/manufacturing time-series + external macro indicators). The aim is to build end-to-end pipelines, from raw data ingestion to survival analysis, machine learning, and deep learning models, and deploy an interactive **Streamlit dashboard** showcasing results.
 
 ---
 
@@ -10,7 +10,7 @@ This project combines **predictive maintenance** (using NASA’s CMAPSS turbofan
 
 1. **Predictive Maintenance**
 
-   * *NASA CMAPSS (C-MAPSS1, C-MAPSS2, etc.)* — simulated turbofan degradation time-series.
+   * *NASA CMAPSS (C-MAPSS1, C-MAPSS2, etc.)* - simulated turbofan degradation time-series.
 
 2. **Demand / Production Forecasting**
 
@@ -39,28 +39,28 @@ This project combines **predictive maintenance** (using NASA’s CMAPSS turbofan
 
 ## 8-Week Project Plan
 
-* **Week 1 — Data Ingestion & EDA**
+* **Week 1 - Data Ingestion & EDA**
   Download CMAPSS and demand datasets, implement loaders, run exploratory analysis.
 
-* **Week 2 — Feature Engineering & Baselines**
+* **Week 2 - Feature Engineering & Baselines**
   Create rolling-window sensor features; build Ridge regression for RUL and ARIMA for demand.
 
-* **Week 3 — Statistical Survival Models**
+* **Week 3 - Statistical Survival Models**
   Fit Weibull / Cox models on CMAPSS; simulate demand/failure scenarios.
 
-* **Week 4 — Machine Learning Models**
+* **Week 4 - Machine Learning Models**
   Train Random Forest / Gradient Boosting for RUL. Analyze feature importances.
 
-* **Week 5 — Deep Learning Demand Forecasting**
+* **Week 5 - Deep Learning Demand Forecasting**
   Build LSTM/Transformer models with exogenous indicators (IPI, PMI).
 
-* **Week 6 — Deep Survival Models**
+* **Week 6 - Deep Survival Models**
   Train LSTM-based RUL regression or DeepSurv survival networks.
 
-* **Week 7 — API Integration & Pipelines**
+* **Week 7 - API Integration & Pipelines**
   Fetch data from FRED/Quandl, merge with demand data; finalize training/evaluation pipelines.
 
-* **Week 8 — Dashboard & Finalization**
+* **Week 8 - Dashboard & Finalization**
   Build Streamlit app: visualize RUL predictions, demand forecasts, uncertainty bands. Write final README, evaluation results, and record demo.
 
 ---
@@ -70,7 +70,6 @@ This project combines **predictive maintenance** (using NASA’s CMAPSS turbofan
 * A **reproducible pipeline** for predictive maintenance and demand forecasting.
 * Benchmarks across statistical, ML, and DL models (MAE, RMSE, MAPE).
 * **Interactive dashboard** with forecasts, survival curves, and feature importances.
-* Resume-ready project with clear documentation, results, and GitHub demo.
 
 ---
 
@@ -80,7 +79,3 @@ This project combines **predictive maintenance** (using NASA’s CMAPSS turbofan
 * **Failure Classification (optional)**: Precision, Recall, F1, AUC.
 * **Demand Forecasting**: MAPE (primary), MAE, RMSE, with rolling-origin backtesting.
 * **Uncertainty**: Quantile forecasts, Monte Carlo dropout.
-
----
-
-Do you want me to also draft the **actual README.md file text** (with repo structure + instructions) so you can paste it into your GitHub as the first commit?
