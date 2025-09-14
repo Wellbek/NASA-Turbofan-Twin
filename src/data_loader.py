@@ -22,26 +22,29 @@ class CMAPSSLoader:
             + [f'sensor_{i}' for i in range(1, 27)]
         )
 
-    def load_dataset(self, dataset_name):
+    def load_dataset(self, dataset_name, split = 'train'):
         """
-        Load CMAPSS training dataset and calcluate RUL (Remaining Useful Life)
+        Load CMAPSS datasets and calcluate RUL (Remaining Useful Life)
         
         Args:
-            dataset_name (str): FD001, FD002, FD003, FD001
+            dataset_name (str): FD001, FD002, FD003, FD004
+            split (str): 'train' or 'test'
 
         Returns:
             pd.DataFrame: Training data with RUL calcluated
         """
-        file_path = self.data_dir / f'train_{dataset_name}.txt'
+        file_path = self.data_dir / f'{split}_{dataset_name}.txt'
 
         if not file_path.exists():
             raise FileNotFoundError(f'Dataset not found: {file_path}')
 
-        # Load raw data
         df = pd.read_csv(file_path, sep=' ', header=None, names=self.columns)
         df = df.dropna(axis=1, how='all')
 
-        df = self._calcluate_rul(df)
+        if split == 'train':
+            df = self._calculate_rul(df)
+        else:
+            df = self._calculate_test_rul(df, dataset_name)
 
         print(f'Loaded {dataset_name}: {df.shape[0]} records, {df["engine_id"].nunique()} engines')
 
@@ -58,6 +61,17 @@ class CMAPSSLoader:
 
         return df
 
+    def _calculate_test_rul(self, df, dataset_name):
+        """Calculate RUL for test split using truth file"""
+        rul_truth = pd.read_csv(self.data_dir / f'RUL_{dataset_name}.txt', header=None)
+        rul_truth.columns = ['truth_rul']
+
+        max_cycles = df.groupby('engine_id')['time_cycles'].max().reset_index()
+        max_cycles['truth_rul'] = rul_truth['truth_rul']
+        
+        df = df.merge(max_cycles, on='engine_id', how='left')
+        df['RUL'] = df['truth_rul'] + (df['time_cycles'].max() - df['time_cycles'])
+        return df.drop('truth_rul', axis=1)
 
 
 
