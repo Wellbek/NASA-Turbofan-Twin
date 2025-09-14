@@ -50,7 +50,7 @@ class CMAPSSLoader:
 
         return df
 
-    def _calcluate_rul(self, df):
+    def _calculate_rul(self, df):
         """Calculate Remaining Useful Life for each engine"""
         max_cycles = df.groupby('engine_id')['time_cycles'].max().reset_index()
         max_cycles.columns = ['engine_id', 'max_cycles']
