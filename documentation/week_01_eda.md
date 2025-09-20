@@ -161,7 +161,7 @@ Absolutely! Let’s **turn this into a professional, beginner-friendly section**
 | ----------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | operational\_setting\_1 | Full range of values across engines | Setting 1 varies normally; likely simulates realistic engine operation. Sensor readings may depend on this.                                   |
 | operational\_setting\_2 | Only certain discrete values appear | Setting 2 is **discrete or limited**, not continuously varied. Models may treat it as categorical or discrete numeric.                        |
-| operational\_setting\_3 | Single constant line across engines | Setting 3 is **constant** in FD001; it does **not vary**, so it likely **does not influence sensor readings**. Could be dropped for modeling. |
+| operational\_setting\_3 | Single constant line across engines | Setting 3 is **constant** in FD001; it does **not vary**, so it likely **does not influence sensor readings**. |
 
 <img width="896" height="701" alt="image" src="https://github.com/user-attachments/assets/046e41f7-19cc-4efd-b1e6-ba131190a99a" />
 
@@ -179,3 +179,38 @@ Absolutely! Let’s **turn this into a professional, beginner-friendly section**
 3. **Operational Setting 3 (constant):**
 
    * No variation → this setting does **not provide information** about degradation.
+
+---
+
+### RUL Data Distribution
+
+**Why analyze RUL data distribution:**
+
+* **Assess data coverage:** Helps determine how many data points are available at each RUL (Remaining Useful Life) level.
+* **Evaluate balance:** Shows whether the training data is evenly distributed across the degradation spectrum, which impacts model training and performance.
+
+**Results for FD001:**
+
+* The distribution shows an **exponential decrease** in the number of entries as RUL increases.
+* This pattern is expected: more data is available in low RULs at the start of their lifes, but the number of entries decreases as engines approach failure, dropping off one by one.
+
+<img width="822" height="493" alt="image" src="https://github.com/user-attachments/assets/69a24074-a81d-4519-825c-c4ce5b1f59c5" />
+
+---
+
+### Engine Lifetime Distribution
+
+**Why analyze engine lifetime distribution:**
+
+* **Addresses the core engineering problem:** Understanding how long each engine operates before failure.
+* Provides insight into the **range of lifetimes** in the dataset, which is essential for modeling RUL.
+* Helps identify **typical vs. extreme cases**, guiding how models might handle engines with unusually long or short lifetimes.
+
+**Results for FD001:**
+
+* Most engines fail between **150–220 cycles**, indicating the typical operational lifespan in this dataset.
+* Only a few engines exceed **220 cycles**, and very few go beyond **350 cycles**, representing extreme cases.
+* **Implications for modeling:** Models may be trained mostly on engines in the 150–220 cycle range; rare long-lived engines could require special handling or weighting to predict accurately.
+
+<img width="791" height="491" alt="image" src="https://github.com/user-attachments/assets/a66c620e-4fa2-4863-8583-189251c4f08c" />
+
