@@ -214,3 +214,115 @@ Absolutely! Let’s **turn this into a professional, beginner-friendly section**
 
 <img width="791" height="491" alt="image" src="https://github.com/user-attachments/assets/a66c620e-4fa2-4863-8583-189251c4f08c" />
 
+---
+
+### Correlation Heatmap of Sensors
+
+**What it shows:**
+
+* Pairwise correlation between all sensors.
+* **Red = strong positive correlation**, **Blue = strong negative correlation**.
+
+**Why valuable:**
+
+* CMAPSS datasets contain many **redundant sensors**. Highly correlated sensors add little new information. Dropping them can reduce dimensionality and simplify modeling.
+* Completely uncorrelated sensors may be **uninformative or noisy**.
+* Helps **avoid overfitting** by reducing the number of features.
+
+**Results / Interpretation for FD001:**
+
+* Sensors identified for potential removal:
+
+  * **Constant:** `sensor_1`, `sensor_5`, `sensor_10`, `sensor_16`, `sensor_18`, `sensor_19`, `sensor_14`
+  * **Duplicate / highly correlated:** `sensor_6`, `sensor_14`
+* **Implication:** Fewer sensors may be used without losing predictive power, simplifying feature engineering and reducing computation.
+
+<img width="882" height="772" alt="image" src="https://github.com/user-attachments/assets/ad95b8e9-70e8-4690-b3ad-0dd0e8b6ed7e" />
+
+
+---
+
+### Engine Sensor Time-Series
+
+**What it shows:**
+
+* Evolution of selected sensor values over operational cycles for individual engines (e.g., `engine_id=1`).
+
+**Why valuable:**
+
+* Reveals **degradation patterns**: some sensors drift steadily with wear; others fluctuate randomly.
+* Identifies potential **“health indicators”** - sensors that reflect engine deterioration.
+* Provides the first clues for **feature engineering**, such as trends, slopes, or rolling statistics.
+
+**Interpretation for FD001:**
+
+| Sensor Pattern      | Sensors                           | What it tells us / Implications for future weeks                                                                                                   |
+| ------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Constant**        | 1, 5, 6, 10, 16, 18, 19           | These sensors do **not reflect degradation**. They can likely be ignored in modeling; including them adds noise but no predictive value.           |
+| **Upwards Trend**   | 2, 3, 4, 8, 9, 11, 12, 13, 15, 17 | These sensors **increase as the engine wears**. They are strong candidates for **RUL prediction features** and can indicate early signs of faults. |
+| **Downwards Trend** | 7, 9, 12, 14, 20, 21              | These sensors **decrease with degradation**. Like upward-trending sensors, they are informative and useful for monitoring engine health.           |
+
+<img width="876" height="566" alt="image" src="https://github.com/user-attachments/assets/74acfbe1-862c-464a-913c-6888cb1af9e3" />
+
+**Forward-looking implications for Week 2+:**
+
+1. Focus feature engineering on sensors with **clear trends** (upwards or downwards) — e.g., slopes, rolling means, or normalized values.
+2. Consider dropping **constant sensors** to simplify the dataset and reduce overfitting risk.
+3. These patterns give an early **sensor selection guide** for predictive modeling; future weeks can prioritize these trends in regression or machine learning approaches.
+
+---
+
+### Operational Settings Distribution
+
+**Why we check operational settings distribution:**
+
+* Engines operate under different conditions; operational settings **influence sensor readings and degradation rate**.
+* Understanding their distribution helps **control for confounding factors** in modeling.
+
+**Interpretation for FD001:**
+
+* **Operational Setting 1:** Full range of values → informative for modeling.
+* **Operational Setting 2:** Discrete values only → may be treated as categorical.
+* **Operational Setting 3:** Constant → not informative, can be ignored.
+
+<img width="860" height="284" alt="image" src="https://github.com/user-attachments/assets/9db69397-bebe-493c-96ec-96b9f6c4fcfd" />
+
+---
+
+### Sensor vs. RUL Scatter
+
+**What it shows:**
+
+* Relationship between individual sensor readings and Remaining Useful Life.
+
+<img width="863" height="566" alt="image" src="https://github.com/user-attachments/assets/7df7a4ea-bb8c-486a-a49a-36648a43c39a" />
+
+**Why valuable:**
+
+* Sensors with **monotonic trends** (increase or decrease steadily as RUL decreases) are **strong predictors** of remaining life.
+* Scatter plots help distinguish **predictive sensors** from noisy or irrelevant ones.
+
+**Interpretation for FD001:**
+
+* `sensor_2`, `sensor_3`, `sensor_4`, `sensor_7`, `sensor_8`, `sensor_9`, `sensor_11`, `sensor_12`, `sensor_13`, `sensor_14`, `sensor_15`, `sensor_17`, `sensor_20`, `sensor_21` show **clear monotonic trends** → strong candidates for predictive modeling.
+* Constant or highly noisy sensors (`sensor_1`, `sensor_5`,  `sensor_6`, `sensor_10`, `sensor_16`, `sensor_18`, `sensor_19`) show **no trend**, likely uninformative.
+
+---
+
+### Normalized Lifecycle Plots
+
+**What it shows:**
+
+* Anaologue to before, sensor trajectories averaged across engines, aligned by **normalized cycle** (`0=start`, `1=end-of-life`).
+
+<img width="863" height="555" alt="image" src="https://github.com/user-attachments/assets/fce8a48e-4d8a-4cdb-9320-cda9914e9f34" />
+
+**Why we check eventhough already examined Sensor vs. RUL via scatter:**
+
+* Engines have different lifespans; raw cycle counts are **not directly comparable**.
+* Normalization allows comparison of **trends across engines**, highlighting consistent degradation patterns.
+
+---
+
+
+
