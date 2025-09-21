@@ -64,8 +64,6 @@ Each row = snapshot of one engine cycle.
 * **FD001 has no missing values**, which is ideal for initial exploration.
 * All sensors, settings, and RUL values are complete, so no imputation is required.
 
-Perfect! Let’s structure this in the same **professional, beginner-friendly style** with explanation, table-style summary, and clear highlights. I’ll include a placeholder for your image.
-
 ---
 
 ### Outlier Detection
