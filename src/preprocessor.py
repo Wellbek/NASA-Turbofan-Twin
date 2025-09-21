@@ -4,6 +4,7 @@ CMAPPS Data Preprocessor
 This module handles data cleaning, filtering and preprocesses based on EDA findings. It aims to remove redundant sensors and applies professional data science best pracices.
 """
 
+import os
 import pandas as pd
 import numpy as np
 from typings import Tuple, List, Dict
