@@ -7,7 +7,6 @@ This module handles data cleaning, filtering and preprocesses based on EDA findi
 import os
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScalar
 
 class CMAPSSPreprocessor:
 
