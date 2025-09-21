@@ -73,35 +73,6 @@ class CMAPSSLoader:
         df['RUL'] = df['truth_rul'] + (df['time_cycles'].max() - df['time_cycles'])
         return df.drop('truth_rul', axis=1)
 
-    def filter_sensors(self, df, corr_threshold=0.95, variance_threshold=1e-3):
-        """
-        Remove low-variance and highly correlated sensor columns from a DataFrame.
-
-        Args:
-            df (pandas.DataFrame): Input DataFrame with sensor columns.
-            corr_threshold (float): Correlation threshold to drop highly correlated sensors.
-            variance_threshold (float): Variance threshold to drop nearly constant sensors.
-
-        Returns:
-            filtered_df (pandas.DataFrame): DataFrame with filtered sensors.
-            dropped_sensors (list): List of sensor names that were removed.
-        """
-
-        sensors = [c for c in df.columns if 'sensor' in c]
-
-        # Drop low-variance sensors (always constant values)
-        variances = df[sensors].var()
-        low_var = variances[variances < variance_threshold].index.tolist()
-
-        # Drop highly correlated sensors
-        corr_matrix = df[sensors].corr().abs()
-        upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-        high_corr = [column for column in upper.columns if any(upper[column] > corr_threshold)]
-
-        drop_list = set(low_var + high_corr)
-        print(f"Dropping {len(drop_list)} sensors: {drop_list}")
-        return df.drop(columns=drop_list), list(drop_list)
-
 
 
 
