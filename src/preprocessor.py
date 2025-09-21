@@ -42,7 +42,7 @@ class CMAPSSPreprocessor:
         sensors = [c for c in df.columns if 'sensor' in c]
         corr_matrix = df[sensors].corr().abs()
         upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-        to_drop = [c for c in upper.columns if any(upper[column] > self.corr_threshold)]
+        to_drop = [c for c in upper.columns if any(upper[c] > self.corr_threshold)]
         return df.drop(columns=to_drop), to_drop
 
     def preprocess(self, df, dataset_name=None):
