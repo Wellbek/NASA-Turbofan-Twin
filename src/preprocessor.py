@@ -23,6 +23,16 @@ class CMAPSSPreprocessor:
         self.variance_threshold = variance_threshold
         self.save_dir = save_dir
 
+    def identify_invalid(self, df):
+        """Filter columns that contain NaNs or invalid values (None, inf, ...).
+
+        These could then consequently be dropped or corrected."""
+        invalid_cols = []
+        for col in df.columns:
+            if df[col].isna().any() or np.isinf(df[col]).any():
+                invalid_cols.append(col)
+        return df.drop(columns=invalid_cols), invalid_cols
+
     def remove_constant_sensors(self, df):
         """Remove sensors with zero variance (completely constant)."""
         sensors = [c for c in df.columns if 'sensor' in c]
@@ -48,6 +58,8 @@ class CMAPSSPreprocessor:
     def preprocess(self, df, dataset_name=None):
         """Run full preprocessing pipeline."""
         dropped = {}
+
+        df, dropped['invalid'] = self.identify_invalid(df)
 
         df, dropped['constant'] = self.remove_constant_sensors(df)
         df, dropped['low_variance'] = self.remove_low_variance_sensors(df)
