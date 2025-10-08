@@ -14,7 +14,7 @@ from pathlib import Path
 
 class CMAPSSLoader:
     """CMAPSS Data Loader"""
-    def __init__(self, data_dir='../data/raw/cmapss'):
+    def __init__(self, data_dir='../data/bronze/cmapss'):
         self.data_dir = Path(data_dir)
         self.columns = (
             ['engine_id', 'time_cycles']
