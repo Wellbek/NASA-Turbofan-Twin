@@ -1,7 +1,9 @@
 # --- Data ---
 # Ignore all processed data
-data/processed/*
-!data/processed/.gitkeep   # keep the empty folder in Git
+data/silver/*
+!data/silver/.gitkeep   # keep the empty folder in Git
+data/gold/*
+!data/gold/.gitkeep   # keep the empty folder in Git
 
 # Keep raw data tracked
 !data/raw/*
