@@ -210,9 +210,30 @@ class CMAPSSPreprocessor:
         
         return df
 
+    def remove_correlated_features(self, df, threshold=0.95):
+        """
+        Remove features with correlation > threshold
+        Keep the first feature in each correlated pair
+        """
+
+        id_cols = ['engine_id', 'time_cycles']
+        target_col = 'RUL'
+        all_cols = df.columns.tolist()
+        exclude_cols = id_cols + [target_col]
+        feature_cols = [col for col in all_cols if col not in exclude_cols]
+        corr_matrix =df[feature_cols].corr().abs()
+        upper_triangle = np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+        upper_corr = corr_matrix.where(upper_triangle)
+    
+        # Find features to drop
+        to_drop = [column for column in upper_corr.columns if any(upper_corr[column] > threshold)]
+    
+        return df.drop(columns=to_drop), to_drop
+
+
     def engineer_features(self, df, dataset_name=None, unit_col='engine_id', cycle_col='time_cycles',
                          windows=[5, 10, 20], lags=[1, 3, 5], ewma_spans=[5, 10, 20],
-                         trend_window=10, rul_clip=125, normalize=True):
+                         trend_window=10, rul_clip=125, correlation_threshold=0.95, normalize=True):
         """
         Full feature engineering pipeline for Gold layer.
         
@@ -237,6 +258,10 @@ class CMAPSSPreprocessor:
         # Normalize features
         if normalize:
             df = self.normalize_features(df, fit=True)
+
+        # Remove correlated features
+        df, dropped = self.remove_correlated_features(df, correlation_threshold)
+        print(f"Dropped {len(dropped)} correlated features.")
         
         # Save to Gold layer
         if self.gold_dir and dataset_name:
