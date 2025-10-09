@@ -216,8 +216,8 @@ class CMAPSSPreprocessor:
         Keep the first feature in each correlated pair
         """
 
-        id_cols = ['engine_id', 'time_cycles']
-        target_col = 'RUL'
+        id_cols = ['engine_id', 'time_cycles', 'RUL']
+        target_col = 'RUL_clipped'
         all_cols = df.columns.tolist()
         exclude_cols = id_cols + [target_col]
         feature_cols = [col for col in all_cols if col not in exclude_cols]
@@ -250,6 +250,7 @@ class CMAPSSPreprocessor:
             normalize: Whether to normalize features
         """                
         # Generate features
+        df = self.clip_rul(df,clip_value = rul_clip)
         df = self.add_rolling_features(df, windows, unit_col)
         df = self.add_lag_features(df, lags, unit_col)
         df = self.add_trend_features(df, trend_window, unit_col)
