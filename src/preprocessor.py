@@ -110,7 +110,7 @@ class CMAPSSPreprocessor:
                 )
                 df[f'{sensor}_rolling_std_{window}'] = grouped.transform(
                     lambda x: x.rolling(window=window, min_periods=1).std()
-                )
+                ).fillna(0) # Fill NaN std with 0 (no variation for single point)
                 df[f'{sensor}_rolling_min_{window}'] = grouped.transform(
                     lambda x: x.rolling(window=window, min_periods=1).min()
                 )
@@ -130,8 +130,10 @@ class CMAPSSPreprocessor:
                 df[f'{sensor}_lag_{lag}'] = df.groupby(unit_col)[sensor].shift(lag)
         
         # Fill NaN values in lag features with forward fill (for early cycles)
+        # Use forward fill THEN backward fill to handle first cycles
         lag_cols = [c for c in df.columns if '_lag_' in c]
-        df[lag_cols] = df.groupby(unit_col)[lag_cols].fillna(method='bfill')
+        for col in lag_cols:
+            df[col] = df.groupby(unit_col)[col].fillna(method='ffill').fillna(method='bfill')
         
         print(f"Added {len(lags) * len(self.sensor_cols)} lag features")
         return df
