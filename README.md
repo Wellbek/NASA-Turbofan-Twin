@@ -60,17 +60,17 @@ The results are visualized via an **interactive Streamlit dashboard**, making it
 * Evaluate baseline performance using MAE, RMSE, and R².
 * **Why:** Provides a reference point to compare more complex models.
 
-### 4. Survival Analysis
-
-* Fit **Weibull and Cox models** to estimate failure probabilities over time.
-* Produce survival curves for engines at different operational stages.
-* **Why:** Offers probabilistic insights into engine health and complements deterministic RUL predictions.
-
-### 5. Machine Learning Models
+### 4. Machine Learning Models
 
 * Train **Random Forest and Gradient Boosting models** for RUL regression.
 * Analyze **feature importance** to identify which sensors most influence predictions.
 * **Why:** ML models capture nonlinear relationships and improve predictive accuracy over linear baselines.
+
+### 5. Survival Analysis
+
+* Fit **Weibull and Cox models** to estimate failure probabilities over time.
+* Produce survival curves for engines at different operational stages.
+* **Why:** Offers probabilistic insights into engine health and complements deterministic RUL predictions.
 
 ### 6. Deep Learning Models
 
