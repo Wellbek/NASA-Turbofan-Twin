@@ -6,7 +6,11 @@ data/gold/*
 !data/gold/.gitkeep   # keep the empty folder in Git
 
 # Keep raw data tracked
-!data/raw/*
+!data/bronze/*
+
+# Ignore models
+data/models/*
+!data/models/.gitkeep   # keep the empty folder in Git
 
 # --- Python ---
 src/__pycache__/
