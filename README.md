@@ -12,6 +12,67 @@ The results are visualized via an **interactive Streamlit dashboard**, making it
 
 ---
 
+## Getting Started
+
+### Prerequisites
+
+* Python 3.9 or higher
+* Git
+
+### Installation
+
+1. Clone the repository:
+
+```bash
+git clone <repository-url>
+cd NASA-Turbofan-Twin
+```
+
+2. Create a virtual environment (recommended):
+
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Running the Dashboard
+
+The interactive Streamlit dashboard provides visualizations of model performance, individual engine analysis, fleet management, and detailed metrics.
+
+```bash
+cd webapp
+streamlit run dashboard.py
+```
+
+The dashboard will open in your browser at `http://localhost:8501`
+
+**Dashboard Pages:**
+
+* **Overview**: System KPIs, model comparison table, and decision framework
+* **Engine Analysis**: Select an engine to see predictions from all models
+* **Model Comparison**: Visual comparison of model performance metrics
+* **Fleet Management**: Risk assessment across all engines with priority scheduling
+* **Performance Metrics**: Detailed metrics with model trade-off analysis
+
+### Running Notebooks
+
+The project follows an 8-week pipeline documented in Jupyter notebooks:
+
+```bash
+cd notebooks
+jupyter notebook 01_eda_cmapss.ipynb
+```
+
+Notebooks should be run in numerical order as they build upon previous work.
+
+---
+
 ## Dataset
 
 **NASA CMAPSS (C-MAPSS1, C-MAPSS2, etc.)**
