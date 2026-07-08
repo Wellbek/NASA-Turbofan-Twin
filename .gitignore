@@ -21,6 +21,9 @@ __pycache__/
 # --- Jupyter ---
 .ipynb_checkpoints/
 
+# --- Node (screenshot tooling) ---
+node_modules/
+
 # --- System files ---
 .DS_Store
 Thumbs.db
