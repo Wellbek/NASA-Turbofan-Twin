@@ -143,6 +143,61 @@ def classify_risk(rul):
     else:
         return "🟢 HEALTHY", "success"
 
+# Process uploaded CSV data
+def process_uploaded_csv(uploaded_file):
+    """Process uploaded CSV file and return formatted data"""
+    try:
+        df = pd.read_csv(uploaded_file)
+
+        # Validate required columns
+        required_cols = ['engine_id', 'time_cycles'] + [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+
+        if missing_cols:
+            st.error(f"Missing required columns: {missing_cols}")
+            return None
+
+        # Keep only relevant sensors
+        sensor_cols = [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
+        df = df[['engine_id', 'time_cycles'] + sensor_cols].copy()
+
+        # Check if we have enough cycles for LSTM (need at least 30)
+        unique_engines = df['engine_id'].nunique()
+        total_cycles = len(df)
+
+        return df, {
+            'unique_engines': unique_engines,
+            'total_cycles': total_cycles,
+            'can_use_lstm': total_cycles >= 30
+        }
+    except Exception as e:
+        st.error(f"Error processing CSV: {e}")
+        return None
+
+# Generate prediction for new data
+def generate_new_prediction(df, models, model_type='gradient_boosting'):
+    """Generate RUL predictions for new sensor data"""
+    try:
+        # Get the most recent cycle for each engine
+        latest_data = df.groupby('engine_id').last().reset_index()
+
+        # Prepare features (sensor columns only)
+        sensor_cols = [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
+        X = latest_data[sensor_cols].values
+
+        # Make predictions
+        if model_type == 'gradient_boosting':
+            prediction = models['gradient_boosting'].predict(X)[0]
+        elif model_type == 'random_forest':
+            prediction = models['random_forest'].predict(X)[0]
+        else:
+            prediction = models['ridge'].predict(X)[0]
+
+        return max(0, prediction), latest_data
+    except Exception as e:
+        st.error(f"Error generating prediction: {e}")
+        return None, None
+
 # Main dashboard
 def main():
     # Header
@@ -162,7 +217,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
         "Select Page",
-        ["🏠 Overview", "🔍 Engine Analysis", "📊 Model Comparison", "🎯 Fleet Management", "📈 Performance Metrics"]
+        ["🏠 Overview", "🔮 New Prediction", "🔍 Engine Analysis", "📊 Model Comparison", "🎯 Fleet Management", "📈 Performance Metrics"]
     )
     
     # Model performance summary
@@ -263,7 +318,309 @@ def main():
             <p><i>Best for risk assessment</i></p>
             </div>
             """, unsafe_allow_html=True)
-    
+
+    # ==================== NEW PREDICTION PAGE ====================
+    elif page == "🔮 New Prediction":
+        st.header("New Engine Prediction")
+
+        # Data input options
+        input_method = st.tabs(["CSV Upload", "Manual Sensor Entry"])
+
+        with input_method[0]:
+            st.subheader("Upload Sensor Data (CSV Format)")
+
+            st.markdown("""
+            **Upload a CSV file with your engine's sensor readings.**
+
+            **Required columns:** `engine_id`, `time_cycles`, and sensor columns:
+            `sensor_2`, `sensor_3`, `sensor_4`, `sensor_7`, `sensor_8`, `sensor_9`,
+            `sensor_11`, `sensor_12`, `sensor_13`, `sensor_15`, `sensor_17`,
+            `sensor_20`, `sensor_21`
+
+            **Format:**
+            - Multiple engines supported
+            - Each row is one cycle
+            - Include recent cycles for best results (at least 30 cycles for LSTM)
+            """)
+
+            uploaded_file = st.file_uploader(
+                "Choose a CSV file",
+                type=['csv'],
+                help="Upload a CSV file with engine sensor readings"
+            )
+
+            if uploaded_file:
+                result = process_uploaded_csv(uploaded_file)
+
+                if result:
+                    df, info = result
+
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Engines", info['unique_engines'])
+                    with col2:
+                        st.metric("Total Cycles", info['total_cycles'])
+                    with col3:
+                        status = "✓ Yes" if info['can_use_lstm'] else "✗ No"
+                        st.metric("Can Use LSTM", status)
+
+                    # Select model
+                    st.subheader("Select Prediction Model")
+                    model_options = ['gradient_boosting', 'random_forest', 'ridge']
+                    if info['can_use_lstm']:
+                        model_options = ['lstm'] + model_options
+
+                    model_type = st.selectbox(
+                        "Choose Model",
+                        model_options,
+                        format_func=lambda x: {
+                            'lstm': 'LSTM (Best Precision)',
+                            'gradient_boosting': 'Gradient Boosting',
+                            'random_forest': 'Random Forest',
+                            'ridge': 'Ridge Regression'
+                        }[x]
+                    )
+
+                    if st.button("Generate Prediction", type="primary"):
+                        rul, latest_data = generate_new_prediction(df, models, model_type)
+
+                        if rul is not None:
+                            risk_label, risk_class = classify_risk(rul)
+
+                            # Display results
+                            st.markdown("---")
+                            st.subheader("📊 Prediction Results")
+
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                if risk_class == "critical":
+                                    st.markdown(f"""
+                                    <div class="critical-box">
+                                    <h3>Predicted RUL</h3>
+                                    <h2>{rul:.1f} cycles</h2>
+                                    <p>{risk_label}</p>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                elif risk_class == "warning":
+                                    st.markdown(f"""
+                                    <div class="warning-box">
+                                    <h3>Predicted RUL</h3>
+                                    <h2>{rul:.1f} cycles</h2>
+                                    <p>{risk_label}</p>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f"""
+                                    <div class="success-box">
+                                    <h3>Predicted RUL</h3>
+                                    <h2>{rul:.1f} cycles</h2>
+                                    <p>{risk_label}</p>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+
+                            with col2:
+                                st.metric(
+                                    "Expected Failure",
+                                    f"In ~{rul:.0f} cycles"
+                                )
+
+                            with col3:
+                                st.metric(
+                                    "Model Used",
+                                    model_type.replace('_', ' ').title()
+                                )
+
+                            # Survival probability
+                            st.subheader("📈 Survival Probability")
+                            time_horizons = [10, 25, 50, 75, 100, 125, 150]
+                            survival_probs = calculate_survival_probability(rul, time_horizons)
+
+                            fig_survival = go.Figure()
+                            fig_survival.add_trace(go.Scatter(
+                                x=time_horizons,
+                                y=[survival_probs.get(t, 0) for t in time_horizons],
+                                mode='lines+markers',
+                                name='Survival Probability',
+                                line=dict(color='#1f77b4', width=3),
+                                marker=dict(size=8),
+                                fill='tozerx'
+                            ))
+                            fig_survival.add_hline(
+                                y=0.5,
+                                line_dash="dash",
+                                line_color="red",
+                                annotation_text="50% Survival Threshold"
+                            )
+                            fig_survival.update_layout(
+                                title="Probability of Surviving N More Cycles",
+                                xaxis_title="Cycles",
+                                yaxis_title="Survival Probability",
+                                hovermode='x unified',
+                                height=400
+                            )
+                            st.plotly_chart(fig_survival, use_container_width=True)
+
+                            # Maintenance recommendation
+                            st.subheader("🔧 Maintenance Recommendation")
+
+                            if rul < 30:
+                                st.error(f"""
+                                **IMMEDIATE ACTION REQUIRED**
+
+                                - Schedule maintenance within the next {int(rul * 0.7)} cycles
+                                - Prepare replacement parts
+                                - Monitor engine closely
+                                """)
+                            elif rul < 60:
+                                st.warning(f"""
+                                **PLAN MAINTENANCE SOON**
+
+                                - Schedule maintenance within {int(rul * 0.8)} cycles
+                                - Order replacement parts
+                                - Increase monitoring frequency
+                                """)
+                            else:
+                                st.success(f"""
+                                **ENGINE HEALTHY**
+
+                                - Next maintenance in approximately {int(rul * 0.8)} cycles
+                                - Continue routine monitoring
+                                - Engine performing within normal parameters
+                                """)
+
+        with input_method[1]:
+            st.subheader("Manual Sensor Entry")
+
+            st.markdown("""
+            Enter the latest sensor readings for a single engine cycle.
+            This uses Gradient Boosting model for prediction.
+
+            **Note:** For best accuracy, use multiple cycles via CSV upload.
+            """)
+
+            # Create form for manual entry
+            with st.form("manual_sensor_form"):
+                st.markdown("#### Sensor Readings")
+
+                sensor_inputs = {}
+                sensors = [2, 3, 4, 7, 8, 9, 11, 12, 13, 15, 17, 20, 21]
+
+                cols = st.columns(4)
+                for i, sensor_id in enumerate(sensors):
+                    with cols[i % 4]:
+                        sensor_inputs[f'sensor_{sensor_id}'] = st.number_input(
+                            f"Sensor {sensor_id}",
+                            value=0.0,
+                            step=0.01,
+                            key=f"sensor_{sensor_id}"
+                        )
+
+                submitted = st.form_submit_button("Predict RUL", type="primary")
+
+                if submitted:
+                    # Create DataFrame from inputs
+                    data = {f'sensor_{s}': [sensor_inputs[f'sensor_{s}']] for s in sensors}
+                    df = pd.DataFrame(data)
+
+                    # Get prediction
+                    rul = models['gradient_boosting'].predict(df.values)[0]
+                    rul = max(0, rul)
+                    risk_label, risk_class = classify_risk(rul)
+
+                    # Display results
+                    st.markdown("---")
+                    st.subheader("📊 Prediction Results")
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        if risk_class == "critical":
+                            st.markdown(f"""
+                            <div class="critical-box">
+                            <h3>Predicted RUL</h3>
+                            <h2>{rul:.1f} cycles</h2>
+                            <p>{risk_label}</p>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        elif risk_class == "warning":
+                            st.markdown(f"""
+                            <div class="warning-box">
+                            <h3>Predicted RUL</h3>
+                            <h2>{rul:.1f} cycles</h2>
+                            <p>{risk_label}</p>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"""
+                            <div class="success-box">
+                            <h3>Predicted RUL</h3>
+                            <h2>{rul:.1f} cycles</h2>
+                            <p>{risk_label}</p>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                    with col2:
+                        st.metric("Expected Failure", f"In ~{rul:.0f} cycles")
+
+                    # Survival probability
+                    st.subheader("📈 Survival Probability")
+                    time_horizons = [10, 25, 50, 75, 100, 125, 150]
+                    survival_probs = calculate_survival_probability(rul, time_horizons)
+
+                    fig_survival = go.Figure()
+                    fig_survival.add_trace(go.Scatter(
+                        x=time_horizons,
+                        y=[survival_probs.get(t, 0) for t in time_horizons],
+                        mode='lines+markers',
+                        name='Survival Probability',
+                        line=dict(color='#1f77b4', width=3),
+                        marker=dict(size=8),
+                        fill='tozerx'
+                    ))
+                    fig_survival.add_hline(
+                        y=0.5,
+                        line_dash="dash",
+                        line_color="red",
+                        annotation_text="50% Survival Threshold"
+                    )
+                    fig_survival.update_layout(
+                        title="Probability of Surviving N More Cycles",
+                        xaxis_title="Cycles",
+                        yaxis_title="Survival Probability",
+                        hovermode='x unified',
+                        height=400
+                    )
+                    st.plotly_chart(fig_survival, use_container_width=True)
+
+                    # Maintenance recommendation
+                    st.subheader("🔧 Maintenance Recommendation")
+
+                    if rul < 30:
+                        st.error(f"""
+                        **IMMEDIATE ACTION REQUIRED**
+
+                        - Schedule maintenance within the next {int(rul * 0.7)} cycles
+                        - Prepare replacement parts
+                        - Monitor engine closely
+                        """)
+                    elif rul < 60:
+                        st.warning(f"""
+                        **PLAN MAINTENANCE SOON**
+
+                        - Schedule maintenance within {int(rul * 0.8)} cycles
+                        - Order replacement parts
+                        - Increase monitoring frequency
+                        """)
+                    else:
+                        st.success(f"""
+                        **ENGINE HEALTHY**
+
+                        - Next maintenance in approximately {int(rul * 0.8)} cycles
+                        - Continue routine monitoring
+                        - Engine performing within normal parameters
+                        """)
+
     # ==================== ENGINE ANALYSIS PAGE ====================
     elif page == "🔍 Engine Analysis":
         st.header("Individual Engine Analysis")
