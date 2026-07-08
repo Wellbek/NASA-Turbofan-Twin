@@ -238,3 +238,33 @@ Notebooks should be run in numerical order as they build upon previous work.
 
 ---
 
+---
+
+## Dashboard Showcase
+
+The interactive dashboard provides real-time insights into engine health, model performance, and fleet-wide risk assessment.
+
+![System Overview](docs/screenshots/01-overview.png)
+
+The Overview page displays key system metrics and model performance comparisons at a glance.
+
+![New Prediction](docs/screenshots/02-new-prediction.png)
+
+Generate predictions for new engine data through CSV upload or manual sensor entry, with confidence intervals and feature importance analysis.
+
+![Engine Analysis](docs/screenshots/03-engine-analysis.png)
+
+Analyze individual engines with detailed RUL predictions from all models, survival probability curves, and maintenance recommendations.
+
+![Model Comparison](docs/screenshots/04-model-comparison.png)
+
+Compare model performance metrics and identify the best model for specific use cases.
+
+![Fleet Management](docs/screenshots/05-fleet-management.png)
+
+Assess fleet-wide risk distribution and prioritize maintenance scheduling across all engines.
+
+![Performance Metrics](docs/screenshots/06-performance-metrics.png)
+
+View detailed performance analysis with model trade-offs, radar charts, and error analysis.
+

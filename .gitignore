@@ -21,6 +21,12 @@ __pycache__/
 # --- Jupyter ---
 .ipynb_checkpoints/
 
+# --- Node (screenshot tooling, kept local) ---
+node_modules/
+take_screenshots.js
+package.json
+package-lock.json
+
 # --- System files ---
 .DS_Store
 Thumbs.db
