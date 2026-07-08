@@ -416,7 +416,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
         "Select Page",
-        ["🏠 Overview", "🔮 New Prediction", "🔍 Engine Analysis", "📊 Model Comparison", "🎯 Fleet Management", "📈 Performance Metrics"]
+        ["🏠 Overview", "🔮 New Prediction", "🔍 Engine Analysis", "📊 Model Comparison", "🎯 Fleet Management", "📈 Performance Metrics", "📚 Workflow"]
     )
     
     # Model performance summary
