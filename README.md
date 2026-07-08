@@ -54,11 +54,13 @@ The dashboard will open in your browser at `http://localhost:8501`
 
 **Dashboard Pages:**
 
-* **Overview**: System KPIs, model comparison table, and decision framework
-* **Engine Analysis**: Select an engine to see predictions from all models
-* **Model Comparison**: Visual comparison of model performance metrics
-* **Fleet Management**: Risk assessment across all engines with priority scheduling
-* **Performance Metrics**: Detailed metrics with model trade-off analysis
+* **🏠 Overview**: System KPIs, model comparison table, and decision framework
+* **🔮 New Prediction**: Upload CSV or enter sensor readings for real-time predictions
+* **🔍 Engine Analysis**: Select an engine to see predictions from all models with SHAP explainability
+* **📊 Model Comparison**: Visual comparison of model performance metrics
+* **🎯 Fleet Management**: Risk assessment across all engines with priority scheduling
+* **📈 Performance Metrics**: Detailed metrics with model trade-off analysis
+* **📚 Workflow**: End-to-end pipeline documentation with industry benchmarks
 
 ### Running Notebooks
 
@@ -97,7 +99,9 @@ Notebooks should be run in numerical order as they build upon previous work.
 * **Statistical Survival Models**: `lifelines` – fit Weibull and Cox proportional hazards models to estimate engine failure probability over time.
 * **Machine Learning**: `scikit-learn` – Random Forests, Gradient Boosting, and Ridge Regression for RUL prediction.
 * **Deep Learning**: `TensorFlow / Keras` – LSTM and sequence models to capture temporal patterns in sensor readings.
+* **Explainability**: `SHAP` – feature attribution and model interpretation for transparency.
 * **Visualization & Dashboard**: `Streamlit`, `Plotly` – create interactive dashboards to explore engine health, feature importance, and RUL forecasts.
+* **Model Persistence**: `joblib` – save and load trained models and metadata.
 
 ---
 
@@ -155,6 +159,10 @@ Notebooks should be run in numerical order as they build upon previous work.
 * **High-quality RUL predictions** with benchmarked performance across linear, ML, and deep learning models.
 * **Interpretability insights** via feature importance and survival analysis.
 * **Interactive dashboard** for exploring engine health and predictive maintenance schedules.
+* **Real-time prediction capability** for new sensor data with confidence intervals.
+* **SHAP explainability** showing which sensors drive each prediction.
+* **Ensemble model** combining LSTM (45%), Gradient Boosting (35%), and Random Forest (20%).
+* **Industry benchmark comparison** demonstrating competitive performance.
 * Reproducible, modular pipeline that can be extended to other turbofan datasets or industrial equipment in real-life scenarios.
 
 ---
@@ -173,5 +181,60 @@ Notebooks should be run in numerical order as they build upon previous work.
   * Predicted probability of failure over time
 * **Uncertainty Estimates**:
 
-  * Prediction intervals from Monte Carlo dropout or ensemble methods
+  * 95% confidence intervals via empirical bootstrapping
+  * Ensemble-based uncertainty quantification
+
+* **Model Interpretability**:
+
+  * SHAP values for feature attribution
+  * Individual model contributions (ensemble)
+  * Risk-based maintenance recommendations
+
+---
+
+## Key Features
+
+### Real-Time Predictions
+- Upload CSV files with sensor readings
+- Manual sensor entry for quick predictions
+- Process multiple engines simultaneously
+
+### Advanced Analytics
+- **Ensemble Model**: Weighted combination of LSTM, Gradient Boosting, and Random Forest
+- **Prediction Intervals**: 95% confidence bounds for uncertainty quantification
+- **SHAP Explainability**: Top 5 influential sensors for each prediction
+- **Survival Analysis**: Weibull and Cox models for failure probability estimation
+
+### Interactive Visualizations
+- Sensor trend charts over engine lifetime
+- Survival probability curves
+- Model performance comparisons
+- Fleet-wide risk assessment
+- Industry benchmark comparisons
+
+### Maintenance Recommendations
+- Risk-based classification (Critical, Warning, Healthy)
+- Actionable maintenance schedules
+- Priority-based engine ranking
+
+---
+
+## Model Performance
+
+| Model | R² Score | MAE (cycles) | Type |
+|-------|----------|--------------|------|
+| Ensemble | 0.82 | 13.2 | Weighted Average |
+| LSTM | 0.8198 | 13.55 | Deep Learning |
+| Gradient Boosting | 0.7999 | 15.8 | Tree Ensemble |
+| Random Forest | 0.7989 | 16.2 | Tree Ensemble |
+| Ridge | 0.7854 | 26.1 | Linear |
+| Weibull AFT | - | 15.8 | Survival (C-index: 0.85) |
+| Cox PH | - | 17.2 | Survival (C-index: 0.804) |
+
+**Ensemble Weights:**
+- LSTM: 45% (based on R² = 0.8198)
+- Gradient Boosting: 35% (based on R² = 0.7999)
+- Random Forest: 20% (based on R² = 0.7989)
+
+---
 
