@@ -4,6 +4,7 @@ import numpy as np
 import pickle
 import joblib
 import json
+import sys
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -21,10 +22,26 @@ MODELS_DIR = DATA_DIR / 'models' / 'cmapss'
 GOLD_DIR = DATA_DIR / 'gold' / 'cmapss'
 METADATA_FILE = MODELS_DIR / 'model_metadata.json'
 
+# Reusable feature engineering (raw sensors -> 153 normalized model features /
+# 20 normalized LSTM features). Models were trained on engineered, normalized
+# features, so inference must rebuild the exact same feature space.
+sys.path.insert(0, str(BASE_DIR / 'src'))
+import feature_engineering as fe
+
+@st.cache_data
+def _lstm_feature_columns():
+    """The 20 LSTM feature columns (cached, read once)."""
+    return fe.get_lstm_feature_columns()
+
+@st.cache_data
+def _model_feature_columns():
+    """The 153 tree/linear model feature columns (cached, read once)."""
+    return fe.get_model_feature_columns()
+
 # Page configuration
 st.set_page_config(
     page_title="Turbofan Engine Predictive Maintenance",
-    page_icon="⚙️",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -33,35 +50,54 @@ st.set_page_config(
 st.markdown("""
     <style>
     .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
+        font-size: 2rem;
+        font-weight: 600;
         color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
+        margin-bottom: 1.5rem;
+        border-bottom: 2px solid #e0e0e0;
+        padding-bottom: 0.5rem;
     }
     .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
+        background-color: #f8f9fa;
+        padding: 1.25rem;
+        border-radius: 8px;
         border-left: 4px solid #1f77b4;
+        margin-bottom: 1rem;
     }
     .warning-box {
         background-color: #fff3cd;
         padding: 1rem;
-        border-radius: 0.5rem;
+        border-radius: 8px;
         border-left: 4px solid #ffc107;
+        margin-bottom: 1rem;
     }
     .critical-box {
         background-color: #f8d7da;
         padding: 1rem;
-        border-radius: 0.5rem;
+        border-radius: 8px;
         border-left: 4px solid #dc3545;
+        margin-bottom: 1rem;
     }
     .success-box {
         background-color: #d4edda;
         padding: 1rem;
-        border-radius: 0.5rem;
+        border-radius: 8px;
         border-left: 4px solid #28a745;
+        margin-bottom: 1rem;
+    }
+    /* Improve sidebar styling */
+    [data-testid="stSidebar"] {
+        background-color: #f8f9fa;
+        border-right: 1px solid #e0e0e0;
+    }
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] label {
+        font-weight: 600;
+        color: #333;
+    }
+    /* Improve main content area */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -107,7 +143,16 @@ def load_models_with_metadata():
                 models[model_name].metadata = model_info
 
             except Exception as e:
-                st.warning(f"Failed to load {model_name}: {e}")
+                st.error(f"Failed to load {model_name}: {e}")
+
+        # Gradient Boosting must load natively. Never silently substitute another
+        # model - a missing model should be visible, not disguised as a different one.
+        if 'gradient_boosting' not in models:
+            st.error(
+                "Gradient Boosting model could not be loaded. "
+                "Retrain it with `notebooks/03-04_machine_learning_models.ipynb` "
+                "to regenerate data/models/cmapss/gb_model.pkl."
+            )
 
         return models, metadata
 
@@ -124,17 +169,49 @@ def load_models_basic():
             st.error(f"Models directory not found: {models_dir}")
             return None
 
-        # Load traditional ML models
-        models['ridge'] = joblib.load(models_dir / 'ridge_model.pkl')
-        models['random_forest'] = joblib.load(models_dir / 'rf_model.pkl')
-        models['gradient_boosting'] = joblib.load(models_dir / 'gb_model.pkl')
+        models = {}
+
+        # Load traditional ML models with fallback
+        try:
+            models['ridge'] = joblib.load(models_dir / 'ridge_model.pkl')
+        except Exception as e:
+            st.warning(f"Could not load Ridge model: {e}")
+
+        try:
+            models['random_forest'] = joblib.load(models_dir / 'rf_model.pkl')
+        except Exception as e:
+            st.warning(f"Could not load Random Forest model: {e}")
+
+        try:
+            models['gradient_boosting'] = joblib.load(models_dir / 'gb_model.pkl')
+        except Exception as e:
+            st.error(f"Could not load Gradient Boosting model: {e}")
 
         # Load survival models
-        models['weibull'] = joblib.load(models_dir / 'waft.pkl')
-        models['cox'] = joblib.load(models_dir / 'cph.pkl')
+        try:
+            models['weibull'] = joblib.load(models_dir / 'waft.pkl')
+        except Exception as e:
+            st.warning(f"Could not load Weibull model: {e}")
+
+        try:
+            models['cox'] = joblib.load(models_dir / 'cph.pkl')
+        except Exception as e:
+            st.warning(f"Could not load Cox model: {e}")
 
         # Load LSTM model
-        models['lstm'] = keras.models.load_model(models_dir / 'lstm_model.keras')
+        try:
+            models['lstm'] = keras.models.load_model(models_dir / 'lstm_model.keras')
+        except Exception as e:
+            st.warning(f"Could not load LSTM model: {e}")
+
+        # Gradient Boosting must load natively. Never silently substitute another
+        # model - a missing model should be visible, not disguised as a different one.
+        if 'gradient_boosting' not in models:
+            st.error(
+                "Gradient Boosting model could not be loaded. "
+                "Retrain it with `notebooks/03-04_machine_learning_models.ipynb` "
+                "to regenerate data/models/cmapss/gb_model.pkl."
+            )
 
         return models
     except Exception as e:
@@ -144,29 +221,48 @@ def load_models_basic():
 # Load test data
 @st.cache_data
 def load_test_data():
-    """Load test dataset"""
+    """Load the pre-engineered test dataset (153 model features + ids).
+
+    The featured file already contains the engineered, normalized features the
+    models were trained on, so Engine Analysis and Fleet Management can feed it
+    directly to Gradient Boosting / Random Forest / Ridge. The LSTM subset is
+    selected from these columns at prediction time.
+    """
     try:
-        df_gold = pd.read_csv(GOLD_DIR / 'FD001_top_features.csv')
-        sensor_cols = [col for col in df_gold.columns if col.startswith('sensor_')]
-        test_data = df_gold[sensor_cols + ['engine_id']]
-        return test_data
+        df = pd.read_csv(GOLD_DIR / 'FD001_featured.csv')
+        feature_cols = _model_feature_columns()
+        keep = ['engine_id', 'time_cycles'] + [c for c in feature_cols if c in df.columns]
+        return df[keep]
     except Exception as e:
         st.error(f"Error loading test data: {e}")
         return None
 
 # Generate predictions
 def predict_rul(engine_data, models, model_type='lstm'):
-    """Generate RUL predictions for an engine"""
-    if model_type == 'lstm':
-        # Reshape for LSTM (samples, timesteps, features)
-        X = engine_data.values.reshape(1, engine_data.shape[0], engine_data.shape[1])
-        prediction = models['lstm'].predict(X, verbose=0)[0][0]
-    else:
-        # Use last cycle for traditional models
-        X = engine_data.iloc[-1:].values
-        prediction = models[model_type].predict(X)[0]
-    
-    return max(0, prediction)  # Ensure non-negative
+    """Generate RUL predictions for an engine.
+
+    ``engine_data`` is a DataFrame of the model's engineered, normalized
+    features (the 153 model columns). LSTM uses its 20-column subset over the
+    last 30 cycles; tree/linear models use the last cycle's full 153 features.
+    """
+    try:
+        if model_type == 'lstm':
+            lstm_cols = [c for c in _lstm_feature_columns() if c in engine_data.columns]
+            seq = engine_data[lstm_cols].iloc[-30:].values
+            if len(seq) < 30 and len(seq) > 0:
+                pad = np.repeat(seq[:1], 30 - len(seq), axis=0)
+                seq = np.vstack([pad, seq])
+            elif len(seq) == 0:
+                seq = np.zeros((30, len(lstm_cols)))
+            X = seq.reshape(1, 30, len(lstm_cols))
+            prediction = models['lstm'].predict(X, verbose=0)[0][0]
+        else:
+            X = engine_data.iloc[-1:].values
+            prediction = models[model_type].predict(X)[0]
+        return max(0, float(prediction))
+    except Exception as e:
+        st.error(f"Error predicting RUL with {model_type}: {e}")
+        return None
 
 # Calculate survival probability
 def calculate_survival_probability(rul, time_horizons=[25, 50, 75, 100]):
@@ -186,29 +282,37 @@ def calculate_survival_probability(rul, time_horizons=[25, 50, 75, 100]):
 def classify_risk(rul):
     """Classify engine risk level based on RUL"""
     if rul < 30:
-        return "🔴 CRITICAL", "critical"
+        return "CRITICAL", "critical"
     elif rul < 60:
-        return "🟡 WARNING", "warning"
+        return "WARNING", "warning"
     else:
-        return "🟢 HEALTHY", "success"
+        return "HEALTHY", "success"
 
 # Process uploaded CSV data
 def process_uploaded_csv(uploaded_file):
-    """Process uploaded CSV file and return formatted data"""
+    """Process uploaded CSV file and return formatted raw sensor data.
+
+    Required columns: engine_id, time_cycles, and the 13 FD001 sensors.
+    Operational settings are optional - if absent they are filled with FD001
+    cruise defaults, since they are part of the model's feature space.
+    """
     try:
         df = pd.read_csv(uploaded_file)
 
-        # Validate required columns
-        required_cols = ['engine_id', 'time_cycles'] + [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
+        required_cols = ['engine_id', 'time_cycles'] + fe.RAW_SENSORS
         missing_cols = [col for col in required_cols if col not in df.columns]
 
         if missing_cols:
             st.error(f"Missing required columns: {missing_cols}")
             return None
 
-        # Keep only relevant sensors
-        sensor_cols = [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
-        df = df[['engine_id', 'time_cycles'] + sensor_cols].copy()
+        keep = ['engine_id', 'time_cycles'] + fe.OPERATIONAL_SETTINGS + fe.RAW_SENSORS
+        df = df[[c for c in keep if c in df.columns]].copy()
+
+        # Default operational settings to FD001 cruise values if not provided.
+        for col in fe.OPERATIONAL_SETTINGS:
+            if col not in df.columns:
+                df[col] = 0.0 if col != 'operational_setting_3' else 100.0
 
         # Check if we have enough cycles for LSTM (need at least 30)
         unique_engines = df['engine_id'].nunique()
@@ -223,26 +327,40 @@ def process_uploaded_csv(uploaded_file):
         st.error(f"Error processing CSV: {e}")
         return None
 
+def engineer_for_prediction(raw_df):
+    """Engineer raw sensor data into the 153 normalized model features.
+
+    Returns a DataFrame with the model's training columns (same row order as
+    the input) plus an ``engine_id`` column for grouping by engine.
+    """
+    features = fe.prepare_model_features(raw_df).copy()
+    features['engine_id'] = raw_df['engine_id'].values
+    return features
+
 # Generate prediction for new data
-def generate_new_prediction(df, models, model_type='gradient_boosting'):
-    """Generate RUL predictions for new sensor data"""
+def generate_new_prediction(raw_df, models, model_type='gradient_boosting'):
+    """Generate RUL predictions for new raw sensor data.
+
+    Engineers the raw upload into the model's 153-feature space, then predicts
+    using the most recent cycle of each engine (tree/linear models) or the last
+    30-cycle sequence (LSTM).
+    """
     try:
-        # Get the most recent cycle for each engine
-        latest_data = df.groupby('engine_id').last().reset_index()
+        features = engineer_for_prediction(raw_df)
+        model_cols = _model_feature_columns()
+        feature_df = features[model_cols]
 
-        # Prepare features (sensor columns only)
-        sensor_cols = [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
-        X = latest_data[sensor_cols].values
-
-        # Make predictions
-        if model_type == 'gradient_boosting':
-            prediction = models['gradient_boosting'].predict(X)[0]
-        elif model_type == 'random_forest':
-            prediction = models['random_forest'].predict(X)[0]
+        if model_type == 'lstm':
+            prediction = predict_rul(feature_df, models, 'lstm')
         else:
-            prediction = models['ridge'].predict(X)[0]
+            # Most recent cycle across the uploaded engines
+            latest_idx = features.groupby('engine_id').tail(1).index
+            X = features.loc[latest_idx, model_cols].values
+            prediction = float(models[model_type].predict(X)[0])
 
-        return max(0, prediction), latest_data
+        if prediction is None:
+            return None, None
+        return max(0, prediction), features.groupby('engine_id').tail(1).reset_index(drop=True)
     except Exception as e:
         st.error(f"Error generating prediction: {e}")
         return None, None
@@ -260,20 +378,27 @@ def predict_ensemble_rul(engine_data, models, metadata=None):
     """
     predictions = {}
 
-    # LSTM prediction
-    if 'lstm' in models and len(engine_data.shape) >= 30:
-        X = engine_data.values.reshape(1, engine_data.shape[0], engine_data.shape[1])
-        predictions['lstm'] = models['lstm'].predict(X, verbose=0)[0][0]
+    # LSTM prediction (20-column subset, last 30 cycles)
+    if 'lstm' in models and len(engine_data) >= 1:
+        lstm_cols = [c for c in _lstm_feature_columns() if c in engine_data.columns]
+        seq = engine_data[lstm_cols].iloc[-30:].values
+        if len(seq) < 30 and len(seq) > 0:
+            pad = np.repeat(seq[:1], 30 - len(seq), axis=0)
+            seq = np.vstack([pad, seq])
+        elif len(seq) == 0:
+            seq = np.zeros((30, len(lstm_cols)))
+        X_lstm = seq.reshape(1, 30, len(lstm_cols))
+        predictions['lstm'] = float(models['lstm'].predict(X_lstm, verbose=0)[0][0])
 
-    # Gradient Boosting prediction (use last cycle)
-    if 'gradient_boosting' in models and len(engine_data.shape) >= 1:
+    # Gradient Boosting prediction (use last cycle, full feature set)
+    if 'gradient_boosting' in models and len(engine_data) >= 1:
         X_gb = engine_data.iloc[-1:].values
-        predictions['gradient_boosting'] = models['gradient_boosting'].predict(X_gb)[0]
+        predictions['gradient_boosting'] = float(models['gradient_boosting'].predict(X_gb)[0])
 
-    # Random Forest prediction (use last cycle)
-    if 'random_forest' in models and len(engine_data.shape) >= 1:
+    # Random Forest prediction (use last cycle, full feature set)
+    if 'random_forest' in models and len(engine_data) >= 1:
         X_rf = engine_data.iloc[-1:].values
-        predictions['random_forest'] = models['random_forest'].predict(X_rf)[0]
+        predictions['random_forest'] = float(models['random_forest'].predict(X_rf)[0])
 
     if not predictions:
         return None
@@ -323,15 +448,14 @@ def get_shap_explanations(engine_data, models, model_type='gradient_boosting', n
             return None
 
         model = models[model_type]
-        
+
         # Use last cycle for explanation
         if hasattr(engine_data, 'iloc'):
             X = engine_data.iloc[-1:].values
+            feature_names = list(engine_data.columns)
         else:
             X = engine_data.values[-1:].reshape(1, -1)
-
-        # Feature names
-        feature_names = [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
+            feature_names = _model_feature_columns()
 
         # Compute SHAP values (use TreeExplainer for tree-based models)
         if model_type in ['random_forest', 'gradient_boosting']:
@@ -344,7 +468,7 @@ def get_shap_explanations(engine_data, models, model_type='gradient_boosting', n
 
         # Get feature importance
         feature_importance = {}
-        for i, (name, value) in enumerate(zip(feature_names, shap_values)):
+        for name, value in zip(feature_names, shap_values):
             feature_importance[name] = abs(value)
 
         # Sort and return top N features
@@ -359,7 +483,7 @@ def get_shap_explanations(engine_data, models, model_type='gradient_boosting', n
 
 def main():
     # Header
-    st.markdown('<p class="main-header">⚙️ Turbofan Engine Predictive Maintenance Dashboard</p>', 
+    st.markdown('<p class="main-header">Turbofan Engine Predictive Maintenance Dashboard</p>',
                 unsafe_allow_html=True)
     
     # Load models and data
@@ -413,24 +537,26 @@ def main():
                 st.markdown(f"**Last Updated:** {metadata['last_updated']}")
 
     # Sidebar - Navigation
-    st.sidebar.title("Navigation")
-    page = st.sidebar.radio(
-        "Select Page",
-        ["🏠 Overview", "🔮 New Prediction", "🔍 Engine Analysis", "📊 Model Comparison", "🎯 Fleet Management", "📈 Performance Metrics"]
-    )
+    with st.sidebar:
+        st.markdown("## Navigation")
+        page = st.selectbox(
+            "Select Page",
+            ["Overview", "New Prediction", "Engine Analysis", "Model Comparison", "Fleet Management", "Performance Metrics"],
+            index=0
+        )
     
     # Model performance summary
     model_performance = {
         'LSTM': {'R²': 0.8198, 'MAE': 13.55, 'Type': 'Precision Predictor'},
-        'Gradient Boosting': {'R²': 0.7999, 'MAE': 15.8, 'Type': 'Strong Baseline'},
-        'Random Forest': {'R²': 0.7989, 'MAE': 16.2, 'Type': 'Interpretable'},
-        'Ridge': {'R²': 0.7854, 'MAE': 26.1, 'Type': 'Simple Baseline'},
+        'Gradient Boosting': {'R²': 0.7999, 'MAE': 13.30, 'Type': 'Strong Baseline'},
+        'Random Forest': {'R²': 0.7989, 'MAE': 13.79, 'Type': 'Interpretable'},
+        'Ridge': {'R²': 0.7854, 'MAE': 15.68, 'Type': 'Simple Baseline'},
         'Weibull AFT': {'Concordance': 0.85, 'MAE': 15.8, 'Type': 'Best Risk Ranking'},
         'Cox PH': {'Concordance': 0.804, 'MAE': 17.2, 'Type': 'Survival Analysis'}
     }
     
     # ==================== OVERVIEW PAGE ====================
-    if page == "🏠 Overview":
+    if page == "Overview":
         st.header("System Overview")
         
         col1, col2, col3 = st.columns(3)
@@ -457,60 +583,60 @@ def main():
             )
         
         st.markdown("---")
-        
+
         # Model comparison table
-        st.subheader("📊 Model Performance Comparison")
+        st.subheader("Model Performance Comparison")
         
         perf_df = pd.DataFrame([
             {'Model': 'LSTM', 'Val R²': 0.8626, 'Test R²': 0.8198, 'MAE': 13.55, 
-             'Concordance': '-', 'Key Strength': 'Best precision predictor'},
-            {'Model': 'Gradient Boosting', 'Val R²': 0.7999, 'Test R²': '-', 'MAE': 15.8,
-             'Concordance': '-', 'Key Strength': 'Strong baseline, interpretable'},
-            {'Model': 'Random Forest', 'Val R²': 0.7989, 'Test R²': '-', 'MAE': 16.2,
-             'Concordance': '-', 'Key Strength': 'Feature importance insights'},
-            {'Model': 'Ridge', 'Val R²': 0.7854, 'Test R²': '-', 'MAE': 26.1,
-             'Concordance': '-', 'Key Strength': 'Simple, stable baseline'},
-            {'Model': 'Weibull AFT', 'Val R²': '-', 'Test R²': '-', 'MAE': 15.8,
+             'Concordance': None, 'Key Strength': 'Best precision predictor'},
+            {'Model': 'Gradient Boosting', 'Val R²': 0.7999, 'Test R²': None, 'MAE': 13.30,
+             'Concordance': None, 'Key Strength': 'Strong baseline, interpretable'},
+            {'Model': 'Random Forest', 'Val R²': 0.7989, 'Test R²': None, 'MAE': 13.79,
+             'Concordance': None, 'Key Strength': 'Feature importance insights'},
+            {'Model': 'Ridge', 'Val R²': 0.7854, 'Test R²': None, 'MAE': 15.68,
+             'Concordance': None, 'Key Strength': 'Simple, stable baseline'},
+            {'Model': 'Weibull AFT', 'Val R²': None, 'Test R²': None, 'MAE': 15.8,
              'Concordance': 0.85, 'Key Strength': 'Best risk ranking'},
-            {'Model': 'Cox PH', 'Val R²': '-', 'Test R²': '-', 'MAE': 17.2,
+            {'Model': 'Cox PH', 'Val R²': None, 'Test R²': None, 'MAE': 17.2,
              'Concordance': 0.804, 'Key Strength': 'Survival analysis'}
         ])
         
         st.dataframe(perf_df, use_container_width=True, hide_index=True)
         
         st.markdown("---")
-        
+
         # Decision framework
-        st.subheader("🎯 Three-Tier Decision Framework")
+        st.subheader("Three-Tier Decision Framework")
         
         col1, col2, col3 = st.columns(3)
         
         with col1:
             st.markdown("""
             <div class="success-box">
-            <h4>🏆 Priority Ranking</h4>
+            <h4>Priority Ranking</h4>
             <p><b>Model:</b> Weibull AFT</p>
             <p><b>Metric:</b> C-index 0.85</p>
             <p><b>Use Case:</b> "Which engines need attention first?"</p>
             <p><i>Best for resource allocation</i></p>
             </div>
             """, unsafe_allow_html=True)
-        
+
         with col2:
             st.markdown("""
             <div class="warning-box">
-            <h4>📅 Precise Scheduling</h4>
+            <h4>Precise Scheduling</h4>
             <p><b>Model:</b> LSTM</p>
             <p><b>Metric:</b> MAE 13.6 cycles</p>
             <p><b>Use Case:</b> "When exactly will Engine #47 fail?"</p>
             <p><i>Best for maintenance windows</i></p>
             </div>
             """, unsafe_allow_html=True)
-        
+
         with col3:
             st.markdown("""
             <div class="metric-card">
-            <h4>📊 Risk Quantification</h4>
+            <h4>Risk Quantification</h4>
             <p><b>Model:</b> Weibull AFT</p>
             <p><b>Metric:</b> Survival curves</p>
             <p><b>Use Case:</b> "What's the failure probability in 50 cycles?"</p>
@@ -519,7 +645,7 @@ def main():
             """, unsafe_allow_html=True)
 
     # ==================== NEW PREDICTION PAGE ====================
-    elif page == "🔮 New Prediction":
+    elif page == "New Prediction":
         st.header("New Engine Prediction")
 
         # Data input options
@@ -573,7 +699,7 @@ def main():
                         "Choose Model",
                         model_options,
                         format_func=lambda x: {
-                            'ensemble': 'Ensemble (LSTM + GB + RF) ★ Best',
+                            'ensemble': 'Ensemble (LSTM + GB + RF) - Best',
                             'lstm': 'LSTM (Best Precision)',
                             'gradient_boosting': 'Gradient Boosting',
                             'random_forest': 'Random Forest',
@@ -586,12 +712,14 @@ def main():
                     if st.button("Generate Prediction", type="primary"):
                         # Handle ensemble prediction
                         if use_ensemble and info['can_use_lstm']:
-                            # Get first engine data for ensemble
+                            # Engineer the first engine's raw data into the
+                            # 153-feature space, then let the ensemble helper
+                            # select the LSTM subset internally.
                             first_engine = df[df['engine_id'] == df['engine_id'].iloc[0]]
-                            sensor_cols = [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
-                            engine_data = first_engine[sensor_cols]
-                            
-                            ensemble_result = predict_ensemble_rul(engine_data, models)
+                            model_cols = _model_feature_columns()
+                            engine_features = engineer_for_prediction(first_engine)[model_cols]
+
+                            ensemble_result = predict_ensemble_rul(engine_features, models)
                             if ensemble_result:
                                 rul, individual_preds = ensemble_result
                             else:
@@ -647,12 +775,12 @@ def main():
                             with col3:
                                 st.metric(
                                     "Model Used",
-                                    "Ensemble ★" if use_ensemble else model_type.replace('_', ' ').title()
+                                    "Ensemble - Best" if use_ensemble else model_type.replace('_', ' ').title()
                                 )
-                            
+
                             # Prediction interval
                             st.markdown("---")
-                            st.subheader("📊 Prediction Interval (95% Confidence)")
+                            st.subheader("Prediction Interval (95% Confidence)")
                             
                             ci_col1, ci_col2, ci_col3 = st.columns(3)
                             with ci_col1:
@@ -667,7 +795,7 @@ def main():
                             # Individual model predictions for ensemble
                             if individual_preds:
                                 st.markdown("---")
-                                st.subheader("🔧 Individual Model Predictions")
+                                st.subheader("Individual Model Predictions")
                                 
                                 pred_col1, pred_col2, pred_col3 = st.columns(3)
                                 with pred_col1:
@@ -678,7 +806,7 @@ def main():
                                     st.metric("Random Forest (20% weight)", f"{individual_preds.get('random_forest', 0):.1f} cycles")
 
                             # Survival probability
-                            st.subheader("📈 Survival Probability")
+                            st.subheader("Survival Probability")
                             time_horizons = [10, 25, 50, 75, 100, 125, 150]
                             survival_probs = calculate_survival_probability(rul, time_horizons)
 
@@ -690,7 +818,7 @@ def main():
                                 name='Survival Probability',
                                 line=dict(color='#1f77b4', width=3),
                                 marker=dict(size=8),
-                                fill='tozerx'
+                                fill='tozeroy'
                             ))
                             fig_survival.add_hline(
                                 y=0.5,
@@ -711,16 +839,12 @@ def main():
                             shap_model = 'gradient_boosting' if use_ensemble else model_type
                             if shap_model in ['gradient_boosting', 'random_forest', 'ridge']:
                                 st.markdown("---")
-                                st.subheader("🔍 Feature Importance (SHAP)")
-                                
-                                if use_ensemble and info['can_use_lstm']:
-                                    first_engine = df[df['engine_id'] == df['engine_id'].iloc[0]]
-                                    sensor_cols = [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
-                                    engine_data = first_engine[sensor_cols]
-                                else:
-                                    sensor_cols = [f'sensor_{i}' for i in [2,3,4,7,8,9,11,12,13,15,17,20,21]]
-                                    engine_data = df[df['engine_id'] == df['engine_id'].iloc[0]][sensor_cols]
-                                
+                                st.subheader("Feature Importance (SHAP)")
+
+                                first_engine = df[df['engine_id'] == df['engine_id'].iloc[0]]
+                                model_cols = _model_feature_columns()
+                                engine_data = engineer_for_prediction(first_engine)[model_cols]
+
                                 shap_results = get_shap_explanations(engine_data, models, shap_model, n_features=5)
                                 
                                 if shap_results:
@@ -742,7 +866,7 @@ def main():
                                     st.caption("Higher importance values indicate greater influence on the prediction")
 
                             # Maintenance recommendation
-                            st.subheader("🔧 Maintenance Recommendation")
+                            st.subheader("Maintenance Recommendation")
 
                             if rul < 30:
                                 st.error(f"""
@@ -773,11 +897,23 @@ def main():
             st.subheader("Manual Sensor Entry")
 
             st.markdown("""
-            Enter the latest sensor readings for a single engine cycle.
-            This uses Gradient Boosting model for prediction.
+            Enter the latest sensor readings for an engine.
+            This uses the Gradient Boosting model for prediction.
 
-            **Note:** For best accuracy, use multiple cycles via CSV upload.
+            The entered readings are treated as a steady-state engine history
+            (the engine has been reading these stable values), which lets us
+            compute the rolling/lag/trend features the model expects.
+
+            **Note:** For multi-cycle history, use CSV upload instead.
             """)
+
+            # Typical FD001 cruise readings - used as sensible defaults so the
+            # form predicts something meaningful instead of all-zero sensors.
+            sensor_defaults = {
+                2: 642.64, 3: 1590.10, 4: 1408.04, 7: 553.44, 8: 2388.09,
+                9: 9060.66, 11: 47.51, 12: 521.48, 13: 2388.09, 15: 8.44,
+                17: 393.00, 20: 38.83, 21: 23.30,
+            }
 
             # Create form for manual entry
             with st.form("manual_sensor_form"):
@@ -791,7 +927,7 @@ def main():
                     with cols[i % 4]:
                         sensor_inputs[f'sensor_{sensor_id}'] = st.number_input(
                             f"Sensor {sensor_id}",
-                            value=0.0,
+                            value=float(sensor_defaults[sensor_id]),
                             step=0.01,
                             key=f"sensor_{sensor_id}"
                         )
@@ -799,12 +935,15 @@ def main():
                 submitted = st.form_submit_button("Predict RUL", type="primary")
 
                 if submitted:
-                    # Create DataFrame from inputs
-                    data = {f'sensor_{s}': [sensor_inputs[f'sensor_{s}']] for s in sensors}
-                    df = pd.DataFrame(data)
+                    # Build a steady-state history from the entered sensors and
+                    # engineer it into the model's 153-feature space.
+                    entered = {f'sensor_{s}': sensor_inputs[f'sensor_{s}'] for s in sensors}
+                    history = fe.make_steady_state_history(entered, n_cycles=30)
+                    model_cols = _model_feature_columns()
+                    df = fe.prepare_model_features(history)[model_cols]
 
-                    # Get prediction
-                    rul = models['gradient_boosting'].predict(df.values)[0]
+                    # Get prediction (last cycle of the steady-state history)
+                    rul = models['gradient_boosting'].predict(df.iloc[-1:].values)[0]
                     rul = max(0, rul)
                     risk_label, risk_class = classify_risk(rul)
 
@@ -861,8 +1000,8 @@ def main():
                     
                     # SHAP explainability
                     st.markdown("---")
-                    st.subheader("🔍 Feature Importance (SHAP)")
-                    
+                    st.subheader("Feature Importance (SHAP)")
+
                     shap_results = get_shap_explanations(df, models, 'gradient_boosting', n_features=5)
                     
                     if shap_results:
@@ -896,7 +1035,7 @@ def main():
                         name='Survival Probability',
                         line=dict(color='#1f77b4', width=3),
                         marker=dict(size=8),
-                        fill='tozerx'
+                        fill='tozeroy'
                     ))
                     fig_survival.add_hline(
                         y=0.5,
@@ -942,7 +1081,7 @@ def main():
                         """)
 
     # ==================== ENGINE ANALYSIS PAGE ====================
-    elif page == "🔍 Engine Analysis":
+    elif page == "Engine Analysis":
         st.header("Individual Engine Analysis")
         
         # Get unique engines
@@ -961,7 +1100,7 @@ def main():
             engine_features = engine_data[feature_cols]
             
             # Generate predictions from all models
-            st.subheader("🎯 RUL Predictions from All Models")
+            st.subheader("RUL Predictions from All Models")
             
             # Get ensemble prediction
             ensemble_result = predict_ensemble_rul(engine_features, models)
@@ -1017,9 +1156,9 @@ def main():
                          delta=f"{rf_rul - ensemble_rul:+.1f} vs Ensemble")
             
             st.markdown("---")
-            
+
             # Prediction interval
-            st.subheader("📊 Prediction Interval (95% Confidence)")
+            st.subheader("Prediction Interval (95% Confidence)")
             lower_ci, upper_ci = get_prediction_interval(ensemble_rul)
             
             pi_col1, pi_col2, pi_col3, pi_col4 = st.columns(4)
@@ -1035,9 +1174,9 @@ def main():
             st.caption(f"We use a 95% confidence interval. Engines failing before {lower_ci:.0f} cycles are unlikely, while failures after {upper_ci:.0f} cycles are also unlikely.")
             
             st.markdown("---")
-            
+
             # SHAP explainability
-            st.subheader("🔍 Feature Importance (SHAP Analysis)")
+            st.subheader("Feature Importance (SHAP Analysis)")
             
             shap_results = get_shap_explanations(engine_features, models, 'gradient_boosting', n_features=5)
             
@@ -1072,9 +1211,9 @@ def main():
                     """)
             
             st.markdown("---")
-            
+
             # Survival probability analysis
-            st.subheader("📊 Survival Probability Analysis")
+            st.subheader("Survival Probability Analysis")
             
             time_horizons = [10, 25, 50, 75, 100, 125, 150]
             survival_probs = calculate_survival_probability(lstm_rul, time_horizons)
@@ -1131,10 +1270,10 @@ def main():
                 """)
             
             # Sensor trends
-            st.subheader("📈 Sensor Readings Trends")
-            
-            # Select top sensors to display
-            sensor_options = feature_cols[:10]  # Display first 10 sensors
+            st.subheader("Sensor Readings Trends")
+
+            # Raw sensor columns only (exclude operational settings and engineered features)
+            sensor_options = [c for c in feature_cols if c in fe.RAW_SENSORS][:10]
             selected_sensors = st.multiselect(
                 "Select sensors to visualize",
                 sensor_options,
@@ -1165,7 +1304,7 @@ def main():
             st.warning("Engine ID column not found in test data.")
     
     # ==================== MODEL COMPARISON PAGE ====================
-    elif page == "📊 Model Comparison":
+    elif page == "Model Comparison":
         st.header("Model Performance Comparison")
         
         # Performance metrics visualization
@@ -1173,7 +1312,7 @@ def main():
         
         models_for_plot = ['Ridge', 'Random Forest', 'Gradient Boosting', 'LSTM']
         r2_scores = [0.7854, 0.7989, 0.7999, 0.8198]
-        mae_scores = [26.1, 16.2, 15.8, 13.55]
+        mae_scores = [15.68, 13.79, 13.30, 13.55]
         
         fig_comparison = make_subplots(
             rows=1, cols=2,
@@ -1204,11 +1343,11 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            improvement = ((26.1 - 13.55) / 26.1) * 100
+            improvement = ((15.68 - 13.55) / 15.68) * 100
             st.metric(
                 "MAE Improvement (Ridge → LSTM)",
                 f"{improvement:.1f}%",
-                delta=f"-{26.1 - 13.55:.2f} cycles"
+                delta=f"-{15.68 - 13.55:.2f} cycles"
             )
         
         with col2:
@@ -1246,7 +1385,7 @@ def main():
         st.dataframe(pd.DataFrame(strengths_data), use_container_width=True, hide_index=True)
     
     # ==================== FLEET MANAGEMENT PAGE ====================
-    elif page == "🎯 Fleet Management":
+    elif page == "Fleet Management":
         st.header("Fleet-Wide Risk Assessment")
         
         if 'engine_id' in test_data.columns:
@@ -1298,15 +1437,15 @@ def main():
                 st.metric("Total Engines", len(fleet_df))
             
             with col2:
-                st.metric("🔴 Critical", critical_count,
+                st.metric("Critical", critical_count,
                          delta=f"{(critical_count/len(fleet_df)*100):.1f}%")
-            
+
             with col3:
-                st.metric("🟡 Warning", warning_count,
+                st.metric("Warning", warning_count,
                          delta=f"{(warning_count/len(fleet_df)*100):.1f}%")
-            
+
             with col4:
-                st.metric("🟢 Healthy", healthy_count,
+                st.metric("Healthy", healthy_count,
                          delta=f"{(healthy_count/len(fleet_df)*100):.1f}%")
             
             # Risk distribution
@@ -1323,20 +1462,20 @@ def main():
             st.plotly_chart(fig_pie, use_container_width=True)
             
             # Priority list
-            st.subheader("🚨 Priority Maintenance Schedule")
+            st.subheader("Priority Maintenance Schedule")
             
             # Sort by RUL (ascending)
             priority_df = fleet_df.sort_values('LSTM RUL').head(20)
-            
+
             # Color code by risk
             def color_risk(val):
-                if '🔴' in val:
+                if 'CRITICAL' in str(val):
                     return 'background-color: #f8d7da'
-                elif '🟡' in val:
+                elif 'WARNING' in str(val):
                     return 'background-color: #fff3cd'
                 else:
                     return 'background-color: #d4edda'
-            
+
             styled_df = priority_df[['Engine ID', 'LSTM RUL', 'Risk Level', 'Cycles Remaining']].style.applymap(
                 color_risk, subset=['Risk Level']
             )
@@ -1365,7 +1504,7 @@ def main():
             st.warning("Engine ID column not found in test data.")
     
     # ==================== PERFORMANCE METRICS PAGE ====================
-    elif page == "📈 Performance Metrics":
+    elif page == "Performance Metrics":
         st.header("Detailed Performance Analysis")
         
         # Model performance table
@@ -1377,7 +1516,7 @@ def main():
                 'Model Type': 'Deep Learning',
                 'R² Score': 0.8198,
                 'MAE (cycles)': 13.55,
-                'Concordance Index': '-',
+                'Concordance Index': None,
                 'Training Time': 'High',
                 'Inference Speed': 'Fast',
                 'Interpretability': 'Low'
@@ -1386,8 +1525,8 @@ def main():
                 'Model': 'Gradient Boosting',
                 'Model Type': 'Tree Ensemble',
                 'R² Score': 0.7999,
-                'MAE (cycles)': 15.8,
-                'Concordance Index': '-',
+                'MAE (cycles)': 13.30,
+                'Concordance Index': None,
                 'Training Time': 'Medium',
                 'Inference Speed': 'Fast',
                 'Interpretability': 'High'
@@ -1396,8 +1535,8 @@ def main():
                 'Model': 'Random Forest',
                 'Model Type': 'Tree Ensemble',
                 'R² Score': 0.7989,
-                'MAE (cycles)': 16.2,
-                'Concordance Index': '-',
+                'MAE (cycles)': 13.79,
+                'Concordance Index': None,
                 'Training Time': 'Medium',
                 'Inference Speed': 'Fast',
                 'Interpretability': 'High'
@@ -1406,8 +1545,8 @@ def main():
                 'Model': 'Ridge Regression',
                 'Model Type': 'Linear',
                 'R² Score': 0.7854,
-                'MAE (cycles)': 26.1,
-                'Concordance Index': '-',
+                'MAE (cycles)': 15.68,
+                'Concordance Index': None,
                 'Training Time': 'Low',
                 'Inference Speed': 'Very Fast',
                 'Interpretability': 'Very High'
@@ -1415,7 +1554,7 @@ def main():
             {
                 'Model': 'Weibull AFT',
                 'Model Type': 'Survival Analysis',
-                'R² Score': '-',
+                'R² Score': None,
                 'MAE (cycles)': 15.8,
                 'Concordance Index': 0.85,
                 'Training Time': 'Low',
@@ -1425,7 +1564,7 @@ def main():
             {
                 'Model': 'Cox PH',
                 'Model Type': 'Survival Analysis',
-                'R² Score': '-',
+                'R² Score': None,
                 'MAE (cycles)': 17.2,
                 'Concordance Index': 0.804,
                 'Training Time': 'Low',
@@ -1483,15 +1622,15 @@ def main():
         
         with col1:
             st.markdown("""
-            ### 🎯 Accuracy Leaders
-            - **LSTM**: 22% improvement over baseline (Ridge)
+            ### Accuracy Leaders
+            - **LSTM**: Best R² (0.82) - 2.5% over Gradient Boosting
             - **Weibull AFT**: Best concordance (0.85) for risk ranking
             - **Gradient Boosting**: Strong runner-up with good speed
             """)
-        
+
         with col2:
             st.markdown("""
-            ### ⚡ Speed & Efficiency
+            ### Speed & Efficiency
             - **Ridge**: Fastest inference, lowest training time
             - **Survival Models**: Low computational cost, fast predictions
             - **LSTM**: Higher training cost but fast inference
@@ -1505,10 +1644,10 @@ def main():
         
         | Model | MAE | RMSE (Est.) | 90th Percentile Error |
         |-------|-----|-------------|----------------------|
-        | LSTM | 13.55 | ~18.2 | ~22 cycles |
-        | Gradient Boosting | 15.8 | ~21.1 | ~26 cycles |
-        | Random Forest | 16.2 | ~21.8 | ~27 cycles |
-        | Ridge | 26.1 | ~35.0 | ~43 cycles |
+        | LSTM | 13.55 | ~17.8 | ~22 cycles |
+        | Gradient Boosting | 13.30 | ~18.6 | ~32 cycles |
+        | Random Forest | 13.79 | ~18.7 | ~32 cycles |
+        | Ridge | 15.68 | ~19.3 | ~32 cycles |
         | Weibull AFT | 15.8 | ~21.3 | ~26 cycles |
         
         **Interpretation**: LSTM provides the tightest prediction intervals, with 90% of predictions 
@@ -1516,35 +1655,35 @@ def main():
         """)
         
         # Model recommendations
-        st.subheader("📋 Model Selection Guide")
+        st.subheader("Model Selection Guide")
         
         st.markdown("""
         ### When to Use Each Model:
-        
-        **🏆 LSTM** - Use when:
+
+        **LSTM** - Use when:
         - Highest precision is required
         - Maintenance windows are tight
         - Computational resources are available
         - Historical sensor sequences are important
-        
-        **🎯 Weibull AFT** - Use when:
+
+        **Weibull AFT** - Use when:
         - Need to rank multiple engines by urgency
         - Resource allocation decisions
         - Risk probability estimates needed
         - Interpretable survival curves required
-        
-        **⚡ Gradient Boosting** - Use when:
+
+        **Gradient Boosting** - Use when:
         - Balance between accuracy and speed needed
         - Feature importance analysis required
         - Real-time predictions in production
         - Good baseline with interpretability
-        
-        **📊 Cox PH** - Use when:
+
+        **Cox PH** - Use when:
         - Time-dependent covariate effects needed
         - Proportional hazards assumption holds
         - Comparative risk analysis required
-        
-        **🔧 Ridge Regression** - Use when:
+
+        **Ridge Regression** - Use when:
         - Quick initial estimates needed
         - Maximum interpretability required
         - Computational resources limited
@@ -1556,7 +1695,6 @@ def main():
     st.markdown("""
     <div style='text-align: center; color: #666;'>
     <p>Turbofan Engine Predictive Maintenance System v1.0</p>
-    <p>Powered by LSTM, Gradient Boosting, and Weibull AFT Models</p>
     </div>
     """, unsafe_allow_html=True)
 
