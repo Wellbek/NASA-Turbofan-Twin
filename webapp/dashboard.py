@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import joblib
+import json
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -17,6 +18,7 @@ BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / 'data'
 MODELS_DIR = DATA_DIR / 'models' / 'cmapss'
 GOLD_DIR = DATA_DIR / 'gold' / 'cmapss'
+METADATA_FILE = MODELS_DIR / 'model_metadata.json'
 
 # Page configuration
 st.set_page_config(
@@ -63,11 +65,57 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Load models function
+# Load models and metadata
 @st.cache_resource
-def load_models():
-    """Load all trained models using joblib"""
-    models = {}
+def load_models_with_metadata():
+    """Load all trained models and their metadata"""
+    try:
+        # Load metadata
+        if not METADATA_FILE.exists():
+            st.warning("Model metadata file not found. Loading models without validation.")
+            return load_models_basic()
+
+        import json
+        with open(METADATA_FILE, 'r') as f:
+            metadata = json.load(f)
+
+        models = {}
+        models_dir = MODELS_DIR
+
+        if not models_dir.exists():
+            st.error(f"Models directory not found: {models_dir}")
+            return None
+
+        # Load each model from metadata
+        for model_name, model_info in metadata['models'].items():
+            model_file = models_dir / model_info['file']
+
+            if not model_file.exists():
+                st.warning(f"Model file not found: {model_file}")
+                continue
+
+            try:
+                if model_info['framework'] == 'tensorflow':
+                    models[model_name] = keras.models.load_model(model_file)
+                elif model_info['framework'] == 'lifelines':
+                    models[model_name] = joblib.load(model_file)
+                else:
+                    models[model_name] = joblib.load(model_file)
+
+                # Add metadata to model object
+                models[model_name].metadata = model_info
+
+            except Exception as e:
+                st.warning(f"Failed to load {model_name}: {e}")
+
+        return models, metadata
+
+    except Exception as e:
+        st.error(f"Error loading metadata: {e}")
+        return load_models_basic()
+
+def load_models_basic():
+    """Fallback function to load models without metadata"""
     try:
         models_dir = MODELS_DIR
 
@@ -206,13 +254,54 @@ def main():
     
     # Load models and data
     with st.spinner("Loading models and data..."):
-        models = load_models()
+        result = load_models_with_metadata()
+
+        if isinstance(result, tuple):
+            models, metadata = result
+            has_metadata = True
+        else:
+            models = result
+            metadata = None
+            has_metadata = False
+
         test_data = load_test_data()
-    
+
     if models is None or test_data is None:
         st.error("Failed to load models or data. Please check file paths.")
         return
-    
+
+    # Show model metadata in sidebar
+    if has_metadata and metadata:
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown("### Model Information")
+
+            for model_name, info in metadata['models'].items():
+                with st.expander(f"{model_name.replace('_', ' ').title()}"):
+                    st.markdown(f"**Type:** {info['type']}")
+                    st.markdown(f"**Framework:** {info['framework']}")
+
+                    if 'metrics' in info:
+                        st.markdown("**Metrics:**")
+                        for metric, value in info['metrics'].items():
+                            if value is not None and value != '-':
+                                st.markdown(f"- {metric}: {value}")
+
+                    st.markdown(f"**Description:** {info.get('description', 'N/A')}")
+                    st.markdown(f"**Trained:** {info['trained_date']}")
+
+    # Dataset info
+    if has_metadata and 'dataset' in metadata:
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown("### Dataset")
+            st.markdown(f"**Name:** {metadata['dataset']['name']}")
+            st.markdown(f"**Engines:** {metadata['dataset']['engines']}")
+            st.markdown(f"**Sensors:** {metadata['dataset']['sensors']}")
+            st.markdown(f"**Records:** {metadata['dataset']['total_records']}")
+            if 'last_updated' in metadata:
+                st.markdown(f"**Last Updated:** {metadata['last_updated']}")
+
     # Sidebar - Navigation
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
