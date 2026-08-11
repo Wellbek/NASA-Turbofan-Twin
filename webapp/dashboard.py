@@ -767,7 +767,7 @@ def render_survival_section(engine_raw, models, horizons=(10, 25, 50, 75, 100, 1
         hovermode='x unified',
         height=400,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     st.caption(
         "From the fitted Weibull AFT model. Held out concordance is around 0.61, "
         "so treat this as a ranking signal rather than a calibrated probability."
@@ -906,7 +906,7 @@ def main():
         } for key, m in metrics['models'].items()]).sort_values(
             '_sort', ascending=False).drop(columns='_sort')
 
-        st.dataframe(comparison, use_container_width=True, hide_index=True)
+        st.dataframe(comparison, width='stretch', hide_index=True)
 
         st.markdown(
             "Validation selected the hyperparameters and the preferred model. "
@@ -922,7 +922,7 @@ def main():
                 'Validation C': f"{m['validation']['concordance']:.3f}",
                 'Test C': f"{m['test']['concordance']:.3f}",
             } for key, m in survival_metrics.items()]),
-                use_container_width=True, hide_index=True)
+                width='stretch', hide_index=True)
             st.caption(
                 "0.5 is random ranking. With 15 engines per split the estimate "
                 "is noisy, and the validation and test columns differ by more "
@@ -1137,7 +1137,7 @@ def main():
                                         color_continuous_scale='Blues'
                                     )
                                     fig_shap.update_layout(yaxis={'categoryorder': 'total ascending'})
-                                    st.plotly_chart(fig_shap, use_container_width=True)
+                                    st.plotly_chart(fig_shap, width='stretch')
                                     
                                     st.caption("Higher importance values indicate greater influence on the prediction")
 
@@ -1282,7 +1282,7 @@ def main():
                             color_continuous_scale='Blues'
                         )
                         fig_shap.update_layout(yaxis={'categoryorder': 'total ascending'})
-                        st.plotly_chart(fig_shap, use_container_width=True)
+                        st.plotly_chart(fig_shap, width='stretch')
                         
                         st.caption("Higher importance values indicate greater influence on the prediction")
 
@@ -1404,7 +1404,7 @@ def main():
                         color_continuous_scale='Blues'
                     )
                     fig_shap.update_layout(yaxis={'categoryorder': 'total ascending'})
-                    st.plotly_chart(fig_shap, use_container_width=True)
+                    st.plotly_chart(fig_shap, width='stretch')
                 
                 with shap_col2:
                     st.markdown("""
@@ -1485,7 +1485,7 @@ def main():
                     height=400
                 )
                 
-                st.plotly_chart(fig_sensors, use_container_width=True)
+                st.plotly_chart(fig_sensors, width='stretch')
         else:
             st.warning("Engine ID column not found in test data.")
     
@@ -1515,7 +1515,7 @@ def main():
         fig_comparison.update_layout(height=420, showlegend=False)
         fig_comparison.update_yaxes(title_text="R2", row=1, col=1)
         fig_comparison.update_yaxes(title_text="MAE (cycles)", row=1, col=2)
-        st.plotly_chart(fig_comparison, use_container_width=True)
+        st.plotly_chart(fig_comparison, width='stretch')
 
         st.markdown("---")
         st.subheader("Validation Against Test")
@@ -1534,7 +1534,7 @@ def main():
         fig_gap.add_trace(go.Bar(x=gap['Model'], y=gap['Test R2'],
                                  name='Test', marker_color='#1f77b4'))
         fig_gap.update_layout(barmode='group', height=400, yaxis_title='R2')
-        st.plotly_chart(fig_gap, use_container_width=True)
+        st.plotly_chart(fig_gap, width='stretch')
 
         st.markdown(
             "Validation picked the hyperparameters and the preferred model, so "
@@ -1582,7 +1582,7 @@ def main():
             'RMSE': table['RMSE'].map('{:.2f}'.format),
             'NASA score': table['NASA score'].map('{:,.0f}'.format),
             'Role': table['Role'],
-        }), use_container_width=True, hide_index=True)
+        }), width='stretch', hide_index=True)
 
         st.caption(
             "NASA score is the CMAPSS asymmetric penalty: late predictions cost "
@@ -1666,7 +1666,7 @@ def main():
             )])
             
             fig_pie.update_layout(height=400)
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width='stretch')
             
             # Priority list
             st.subheader("Priority Maintenance Schedule")
@@ -1688,7 +1688,7 @@ def main():
                 ['Engine ID', 'LSTM RUL', 'Risk Level', 'Cycles Remaining']
             ].style.map(color_risk, subset=['Risk Level'])
             
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            st.dataframe(styled_df, width='stretch', hide_index=True)
             
             # RUL distribution
             st.subheader("RUL Distribution Across Fleet")
@@ -1707,7 +1707,7 @@ def main():
                 height=400
             )
             
-            st.plotly_chart(fig_hist, use_container_width=True)
+            st.plotly_chart(fig_hist, width='stretch')
         else:
             st.warning("Engine ID column not found in test data.")
     
@@ -1727,7 +1727,7 @@ def main():
             'MAE': table['MAE'].map('{:.2f}'.format),
             'RMSE': table['RMSE'].map('{:.2f}'.format),
             'NASA score': table['NASA score'].map('{:,.0f}'.format),
-        }), use_container_width=True, hide_index=True)
+        }), width='stretch', hide_index=True)
 
         st.caption(
             f"{metrics['split']['test']} engines, {metrics['n_features']} features, "
@@ -1760,7 +1760,7 @@ def main():
 
         if residual_rows:
             residuals = pd.DataFrame(residual_rows)
-            st.dataframe(residuals, use_container_width=True, hide_index=True)
+            st.dataframe(residuals, width='stretch', hide_index=True)
 
             fig_resid = go.Figure()
             for row in residual_rows:
@@ -1772,7 +1772,7 @@ def main():
                 height=340,
                 xaxis_title='95% interval width (cycles)',
                 title='Narrower is more useful, provided it is honest')
-            st.plotly_chart(fig_resid, use_container_width=True)
+            st.plotly_chart(fig_resid, width='stretch')
 
             st.caption(
                 "A median residual away from zero means the model is biased in "
@@ -1803,7 +1803,7 @@ def main():
             {'Model': 'Weibull AFT / Cox', 'Training cost': 'Very low',
              'Input needed': '100 cycles to the landmark',
              'Interpretability': 'High, and gives a probability not a point'},
-        ]), use_container_width=True, hide_index=True)
+        ]), width='stretch', hide_index=True)
 
         st.markdown("---")
         st.subheader("How to Read These Numbers")
@@ -1901,7 +1901,7 @@ raw CMAPSS files  (data/bronze, tracked in git, never written to)
              'What happens': 'Test scored once, with residual quantiles kept for intervals',
              'Artifact': 'metrics.json'},
         ])
-        st.dataframe(stages, use_container_width=True, hide_index=True)
+        st.dataframe(stages, width='stretch', hide_index=True)
 
         st.markdown("---")
         st.subheader("What Went Wrong the First Time")
