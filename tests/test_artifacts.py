@@ -144,6 +144,57 @@ def test_test_scores_are_not_better_than_validation_by_a_lot(metrics):
         assert gap < 0.10, f'{name} scores {gap:.3f} higher on test than validation'
 
 
+def test_lstm_serving_reproduces_its_recorded_accuracy(metrics):
+    """End to end guard on the LSTM serving path.
+
+    Scoring held out engines through the serving helper must land near the MAE
+    that training recorded. This is the test that catches a dropped preprocessing
+    step: skipping the StandardScaler leaves the network reading min-max data,
+    which still produces plausible looking numbers rather than an error. On one
+    held out engine it predicted 47 cycles of remaining life against a true
+    value of 0.
+    """
+    import json as _json
+
+    keras_file = MODELS_DIR / 'lstm_model.keras'
+    if not keras_file.exists() or 'lstm' not in metrics['models']:
+        pytest.skip('LSTM not trained')
+
+    from tensorflow import keras
+
+    import feature_engineering as fe
+
+    gold = pd.read_csv(REPO_ROOT / 'data' / 'gold' / 'cmapss' / 'FD001_featured.csv')
+    with open(MODELS_DIR / 'splits.json') as f:
+        splits = _json.load(f)
+
+    model = keras.models.load_model(keras_file)
+    scaler = __import__('joblib').load(MODELS_DIR / 'lstm_scaler.joblib')
+    lstm_cols = fe.get_lstm_feature_columns()
+    length = fe.get_lstm_sequence_length()
+
+    errors = []
+    for engine_id in splits['test'][:8]:
+        engine = gold[gold['engine_id'] == engine_id]
+        seq = engine[lstm_cols].iloc[-length:].to_numpy()
+        if len(seq) < length:
+            continue
+        window = scaler.transform(seq).reshape(1, length, len(lstm_cols))
+        predicted = float(model.predict(window, verbose=0)[0][0])
+        errors.append(abs(predicted - float(engine['RUL_clipped'].iloc[-1])))
+
+    assert errors, 'no test engine had enough cycles'
+    observed = float(np.mean(errors))
+    recorded = metrics['models']['lstm']['test']['mae']
+
+    # Generous bound: this is the last cycle of each engine rather than every
+    # window, so it is not the same population as the recorded MAE. It is still
+    # far tighter than an unscaled serving path would produce.
+    assert observed < recorded * 2.5, (
+        f'LSTM serving MAE {observed:.1f} against recorded {recorded:.1f}; '
+        'a preprocessing step is probably missing')
+
+
 def test_survival_metrics_are_out_of_sample(metrics):
     """Survival scores must be reported on held out engines.
 

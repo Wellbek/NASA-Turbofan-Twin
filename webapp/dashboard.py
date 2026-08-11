@@ -347,24 +347,51 @@ def load_raw_cycles():
         return None
     return pd.read_csv(path)
 
+@st.cache_resource
+def load_lstm_scaler():
+    """The StandardScaler the LSTM was trained with."""
+    path = MODELS_DIR / 'lstm_scaler.joblib'
+    if not path.exists():
+        return None
+    return joblib.load(path)
+
+
+def build_lstm_window(engine_data):
+    """Last N cycles of the LSTM feature subset, scaled the way it was trained.
+
+    The pipeline's min-max normalization is only half of what the LSTM expects.
+    It was also fitted on standardised sequences, so the saved StandardScaler
+    has to be applied here too. Leaving it out feeds the network inputs on a
+    scale it never saw, which is the train/serve skew this project already had
+    once when the scaler was not saved at all.
+    """
+    length = fe.get_lstm_sequence_length()
+    lstm_cols = [c for c in _lstm_feature_columns() if c in engine_data.columns]
+    seq = engine_data[lstm_cols].iloc[-length:].to_numpy()
+
+    if 0 < len(seq) < length:
+        pad = np.repeat(seq[:1], length - len(seq), axis=0)
+        seq = np.vstack([pad, seq])
+    elif len(seq) == 0:
+        seq = np.zeros((length, len(lstm_cols)))
+
+    scaler = load_lstm_scaler()
+    if scaler is not None:
+        seq = scaler.transform(seq)
+    return seq.reshape(1, length, len(lstm_cols))
+
+
 # Generate predictions
 def predict_rul(engine_data, models, model_type='lstm'):
     """Generate RUL predictions for an engine.
 
     ``engine_data`` is a DataFrame of the model's engineered, normalized
-    features (the 153 model columns). LSTM uses its 20-column subset over the
-    last 30 cycles; tree/linear models use the last cycle's full 153 features.
+    features. LSTM uses its own column subset over the last 30 cycles;
+    tree/linear models use the last cycle's full feature row.
     """
     try:
         if model_type == 'lstm':
-            lstm_cols = [c for c in _lstm_feature_columns() if c in engine_data.columns]
-            seq = engine_data[lstm_cols].iloc[-30:].values
-            if len(seq) < 30 and len(seq) > 0:
-                pad = np.repeat(seq[:1], 30 - len(seq), axis=0)
-                seq = np.vstack([pad, seq])
-            elif len(seq) == 0:
-                seq = np.zeros((30, len(lstm_cols)))
-            X = seq.reshape(1, 30, len(lstm_cols))
+            X = build_lstm_window(engine_data)
             prediction = models['lstm'].predict(X, verbose=0)[0][0]
         else:
             X = engine_data.iloc[-1:].values
@@ -544,16 +571,9 @@ def predict_ensemble_rul(engine_data, models, metrics=None):
     """
     predictions = {}
 
-    # LSTM prediction (20-column subset, last 30 cycles)
+    # LSTM prediction over its own feature subset and sequence length.
     if 'lstm' in models and len(engine_data) >= 1:
-        lstm_cols = [c for c in _lstm_feature_columns() if c in engine_data.columns]
-        seq = engine_data[lstm_cols].iloc[-30:].values
-        if len(seq) < 30 and len(seq) > 0:
-            pad = np.repeat(seq[:1], 30 - len(seq), axis=0)
-            seq = np.vstack([pad, seq])
-        elif len(seq) == 0:
-            seq = np.zeros((30, len(lstm_cols)))
-        X_lstm = seq.reshape(1, 30, len(lstm_cols))
+        X_lstm = build_lstm_window(engine_data)
         predictions['lstm'] = float(models['lstm'].predict(X_lstm, verbose=0)[0][0])
 
     # Gradient Boosting prediction (use last cycle, full feature set)
@@ -843,33 +863,26 @@ def main():
 
         col1, col2, col3 = st.columns(3)
 
+        # No `delta` on any of these: Streamlit always draws a directional
+        # arrow next to a delta, and none of these values have a direction.
+        # The secondary figure goes in a caption instead.
         with col1:
-            st.metric(
-                label="Best model, held out test",
-                value=display_name(best_key),
-                delta=f"R2 = {best['test']['r2']:.3f}",
-            )
+            st.metric(label="Best model, held out test", value=display_name(best_key))
+            st.caption(f"R2 {best['test']['r2']:.3f}")
 
         with col2:
-            st.metric(
-                label="Typical error",
-                value=f"{best['test']['mae']:.1f} cycles",
-                delta=f"RMSE {best['test']['rmse']:.1f}",
-                delta_color="off",
-            )
+            st.metric(label="Typical error", value=f"{best['test']['mae']:.1f} cycles")
+            st.caption(f"RMSE {best['test']['rmse']:.1f}")
 
         with col3:
             if survival_metrics:
                 ranked = max(survival_metrics.items(),
                              key=lambda kv: kv[1]['test']['concordance'])
-                st.metric(
-                    label="Best risk ranking",
-                    value=display_name(ranked[0]),
-                    delta=f"C-index = {ranked[1]['test']['concordance']:.3f}",
-                    delta_color="off",
-                )
+                st.metric(label="Best risk ranking", value=display_name(ranked[0]))
+                st.caption(f"C-index {ranked[1]['test']['concordance']:.3f}")
             else:
                 st.metric(label="Best risk ranking", value="Not trained")
+                st.caption("Run `python -m src.train` to fit the survival models")
 
         st.caption(
             f"Scored on {metrics['split']['test']} engines held out of training "
@@ -880,15 +893,18 @@ def main():
 
         st.subheader("Model Performance Comparison")
 
+        # Formatted as strings so every row shows the same number of decimals.
+        # Rounded floats render as 0.847 next to 0.8289, which reads as sloppy.
         comparison = pd.DataFrame([{
             'Model': display_name(key),
-            'Validation R2': round(m['validation']['r2'], 4),
-            'Test R2': round(m['test']['r2'], 4),
-            'Test MAE': round(m['test']['mae'], 2),
-            'Test RMSE': round(m['test']['rmse'], 2),
+            'Validation R2': f"{m['validation']['r2']:.4f}",
+            'Test R2': f"{m['test']['r2']:.4f}",
+            'Test MAE': f"{m['test']['mae']:.2f}",
+            'Test RMSE': f"{m['test']['rmse']:.2f}",
+            '_sort': m['test']['r2'],
             'Role': MODEL_ROLES.get(key, ''),
         } for key, m in metrics['models'].items()]).sort_values(
-            'Test R2', ascending=False)
+            '_sort', ascending=False).drop(columns='_sort')
 
         st.dataframe(comparison, use_container_width=True, hide_index=True)
 
@@ -903,8 +919,8 @@ def main():
             st.markdown("**Survival models** (concordance index, held out engines)")
             st.dataframe(pd.DataFrame([{
                 'Model': display_name(key),
-                'Validation C': round(m['validation']['concordance'], 3),
-                'Test C': round(m['test']['concordance'], 3),
+                'Validation C': f"{m['validation']['concordance']:.3f}",
+                'Test C': f"{m['test']['concordance']:.3f}",
             } for key, m in survival_metrics.items()]),
                 use_container_width=True, hide_index=True)
             st.caption(
@@ -1559,9 +1575,14 @@ def main():
         st.markdown("---")
         st.subheader("Trade-offs")
 
-        st.dataframe(
-            table[['Model', 'R2', 'MAE', 'RMSE', 'NASA score', 'Role']].round(3),
-            use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame({
+            'Model': table['Model'],
+            'R2': table['R2'].map('{:.4f}'.format),
+            'MAE': table['MAE'].map('{:.2f}'.format),
+            'RMSE': table['RMSE'].map('{:.2f}'.format),
+            'NASA score': table['NASA score'].map('{:,.0f}'.format),
+            'Role': table['Role'],
+        }), use_container_width=True, hide_index=True)
 
         st.caption(
             "NASA score is the CMAPSS asymmetric penalty: late predictions cost "
@@ -1700,9 +1721,13 @@ def main():
         table = metrics_table(metrics, 'test')
 
         st.subheader("Held Out Test Metrics")
-        st.dataframe(
-            table[['Model', 'R2', 'MAE', 'RMSE', 'NASA score']].round(3),
-            use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame({
+            'Model': table['Model'],
+            'R2': table['R2'].map('{:.4f}'.format),
+            'MAE': table['MAE'].map('{:.2f}'.format),
+            'RMSE': table['RMSE'].map('{:.2f}'.format),
+            'NASA score': table['NASA score'].map('{:,.0f}'.format),
+        }), use_container_width=True, hide_index=True)
 
         st.caption(
             f"{metrics['split']['test']} engines, {metrics['n_features']} features, "

@@ -29,3 +29,6 @@ package-lock.json
 # --- System files ---
 .DS_Store
 Thumbs.db
+
+# Generated on demand by the screenshot tooling, not a project artifact.
+docs/screenshots/sample_upload.csv
