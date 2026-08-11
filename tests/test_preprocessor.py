@@ -72,6 +72,49 @@ def test_trend_features_run_and_fill_the_first_cycle(prep, small_slice):
     assert first_row[f'{sensor}_diff'] == 0
 
 
+@pytest.mark.parametrize('window', [5, 10, 20])
+def test_rolling_slope_matches_a_least_squares_fit(small_slice, window):
+    """The closed form slope must agree with an explicit polyfit.
+
+    The closed form replaced a per-window np.polyfit call for speed, so this
+    pins it against the thing it replaced rather than against stored numbers.
+    """
+    from preprocessor import _rolling_slope
+
+    series = small_slice[small_slice['engine_id'] == 1]['sensor_2'].reset_index(drop=True)
+
+    def reference(s):
+        if len(s) < 2:
+            return 0.0
+        y = s.to_numpy()
+        if np.std(y) == 0:
+            return 0.0
+        return np.polyfit(np.arange(len(y)), y, 1)[0]
+
+    expected = series.rolling(window=window, min_periods=2).apply(reference, raw=False)
+    actual = _rolling_slope(series, window)
+
+    assert expected.isna().equals(actual.isna())
+    np.testing.assert_allclose(actual.dropna(), expected.dropna(), atol=1e-9)
+
+
+def test_rolling_slope_is_zero_for_a_flat_signal():
+    from preprocessor import _rolling_slope
+    import pandas as pd
+
+    flat = pd.Series([3.0] * 40)
+    assert float(np.nanmax(np.abs(_rolling_slope(flat, 10)))) == 0.0
+
+
+def test_rolling_slope_recovers_a_known_gradient():
+    from preprocessor import _rolling_slope
+    import pandas as pd
+
+    ramp = pd.Series(np.arange(50, dtype=float) * 2.5)
+    slopes = _rolling_slope(ramp, 10).dropna()
+    np.testing.assert_allclose(slopes, 2.5, atol=1e-9)
+
+
 def test_ewma_features_run(prep, small_slice):
     out = prep.add_ewma_features(small_slice, spans=[5])
     ewma_cols = [c for c in out.columns if '_ewma_' in c]

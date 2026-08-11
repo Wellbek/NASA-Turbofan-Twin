@@ -38,6 +38,10 @@ def test_fd001(loader):
 
 @pytest.fixture
 def small_slice(train_fd001):
-    """First 10 engines, enough to exercise the feature pipeline quickly."""
-    engines = sorted(train_fd001['engine_id'].unique())[:10]
+    """First 8 engines, enough to exercise the feature pipeline quickly.
+
+    Kept small deliberately: these tests are about correctness of the wiring,
+    not about model quality, and CI should stay under a minute.
+    """
+    engines = sorted(train_fd001['engine_id'].unique())[:8]
     return train_fd001[train_fd001['engine_id'].isin(engines)].copy()
