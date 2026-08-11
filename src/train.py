@@ -239,7 +239,6 @@ def make_sequences(frame: pd.DataFrame, cols: list, length: int):
 
 def train_lstm(pipe, splits, featured, top_features):
     print('[6/8] training LSTM')
-    import tensorflow as tf
     from sklearn.preprocessing import StandardScaler
     from tensorflow import keras
 

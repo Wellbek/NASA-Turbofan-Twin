@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle
 import joblib
 import json
 import sys
@@ -9,34 +8,107 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from tensorflow import keras
-from scipy import stats
 import shap
 from pathlib import Path
-import warnings
-warnings.filterwarnings('ignore')
 
 # Set up paths
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / 'data'
 MODELS_DIR = DATA_DIR / 'models' / 'cmapss'
+SILVER_DIR = DATA_DIR / 'silver' / 'cmapss'
 GOLD_DIR = DATA_DIR / 'gold' / 'cmapss'
 METADATA_FILE = MODELS_DIR / 'model_metadata.json'
+METRICS_FILE = MODELS_DIR / 'metrics.json'
+SPLITS_FILE = MODELS_DIR / 'splits.json'
 
-# Reusable feature engineering (raw sensors -> 153 normalized model features /
-# 20 normalized LSTM features). Models were trained on engineered, normalized
-# features, so inference must rebuild the exact same feature space.
+# The models were trained on engineered, normalized features, so inference has
+# to rebuild the exact same feature space. src/feature_engineering.py does that
+# by loading the pipeline that training fitted and saved, rather than
+# reimplementing the formulas here.
 sys.path.insert(0, str(BASE_DIR / 'src'))
 import feature_engineering as fe
 
 @st.cache_data
 def _lstm_feature_columns():
-    """The 20 LSTM feature columns (cached, read once)."""
+    """The LSTM feature columns (cached, read once)."""
     return fe.get_lstm_feature_columns()
 
 @st.cache_data
 def _model_feature_columns():
-    """The 153 tree/linear model feature columns (cached, read once)."""
+    """The tree/linear model feature columns (cached, read once)."""
     return fe.get_model_feature_columns()
+
+
+# --------------------------------------------------------------------------
+# Metrics
+#
+# Every number this dashboard shows comes from the artifact the training run
+# writes. They used to be typed into about ten places by hand and had already
+# drifted out of agreement with each other, with model_metadata.json and with
+# the README.
+# --------------------------------------------------------------------------
+
+DISPLAY_NAMES = {
+    'lstm': 'LSTM',
+    'gradient_boosting': 'Gradient Boosting',
+    'random_forest': 'Random Forest',
+    'ridge': 'Ridge',
+    'lasso': 'Lasso',
+    'linear_regression': 'Linear Regression',
+    'weibull': 'Weibull AFT',
+    'cox': 'Cox PH',
+}
+
+MODEL_ROLES = {
+    'lstm': 'Sequence model, needs 30 cycles of history',
+    'gradient_boosting': 'Strong tabular baseline, fast and explainable',
+    'random_forest': 'Interpretable ensemble, feature importance',
+    'ridge': 'Regularized linear baseline',
+    'lasso': 'Sparse linear baseline',
+    'linear_regression': 'Unregularized reference point',
+}
+
+
+@st.cache_data
+def load_metrics():
+    """Validation and test scores written by `python -m src.train`."""
+    if not METRICS_FILE.exists():
+        return None
+    with open(METRICS_FILE) as f:
+        return json.load(f)
+
+
+def display_name(key):
+    return DISPLAY_NAMES.get(key, key.replace('_', ' ').title())
+
+
+def metrics_table(metrics, split='test'):
+    """Long form table of every regression model's scores for one split."""
+    rows = [{
+        'key': key,
+        'Model': display_name(key),
+        'R2': m[split]['r2'],
+        'MAE': m[split]['mae'],
+        'RMSE': m[split]['rmse'],
+        'NASA score': m[split]['nasa_score'],
+        'Role': MODEL_ROLES.get(key, ''),
+    } for key, m in metrics['models'].items()]
+    return pd.DataFrame(rows).sort_values('R2', ascending=False).reset_index(drop=True)
+
+
+def best_model_key(metrics, split='test'):
+    return max(metrics['models'].items(), key=lambda kv: kv[1][split]['r2'])[0]
+
+
+def require_metrics():
+    """Show a clear message instead of inventing numbers when untrained."""
+    metrics = load_metrics()
+    if metrics is None:
+        st.warning(
+            "No metrics artifact found. Run `python -m src.train` from the repo "
+            "root to train the models and generate data/models/cmapss/metrics.json."
+        )
+    return metrics
 
 # Page configuration
 st.set_page_config(
@@ -145,13 +217,25 @@ def load_models_with_metadata():
             except Exception as e:
                 st.error(f"Failed to load {model_name}: {e}")
 
+        # Survival models are not in the metrics-shaped metadata block, since
+        # they are scored by concordance rather than R2, so they are loaded by
+        # name. Without this the dashboard silently has no survival model and
+        # every survival section renders empty.
+        for name, filename in (('weibull', 'waft.pkl'), ('cox', 'cph.pkl')):
+            path = models_dir / filename
+            if path.exists():
+                try:
+                    models[name] = joblib.load(path)
+                except Exception as e:
+                    st.warning(f"Could not load {name}: {e}")
+
         # Gradient Boosting must load natively. Never silently substitute another
         # model - a missing model should be visible, not disguised as a different one.
         if 'gradient_boosting' not in models:
             st.error(
                 "Gradient Boosting model could not be loaded. "
-                "Retrain it with `notebooks/03-04_machine_learning_models.ipynb` "
-                "to regenerate data/models/cmapss/gb_model.pkl."
+                "Run `python -m src.train` from the repo root to regenerate "
+                "data/models/cmapss/gb_model.pkl."
             )
 
         return models, metadata
@@ -209,8 +293,8 @@ def load_models_basic():
         if 'gradient_boosting' not in models:
             st.error(
                 "Gradient Boosting model could not be loaded. "
-                "Retrain it with `notebooks/03-04_machine_learning_models.ipynb` "
-                "to regenerate data/models/cmapss/gb_model.pkl."
+                "Run `python -m src.train` from the repo root to regenerate "
+                "data/models/cmapss/gb_model.pkl."
             )
 
         return models
@@ -218,24 +302,50 @@ def load_models_basic():
         st.error(f"Error loading models: {e}")
         return None
 
-# Load test data
 @st.cache_data
-def load_test_data():
-    """Load the pre-engineered test dataset (153 model features + ids).
+def load_splits():
+    """Which engines were train, validation and test."""
+    if not SPLITS_FILE.exists():
+        return None
+    with open(SPLITS_FILE) as f:
+        return json.load(f)
 
-    The featured file already contains the engineered, normalized features the
-    models were trained on, so Engine Analysis and Fleet Management can feed it
-    directly to Gradient Boosting / Random Forest / Ridge. The LSTM subset is
-    selected from these columns at prediction time.
+
+@st.cache_data
+def load_evaluation_data(split='test'):
+    """Engineered features for one split, defaulting to held out engines.
+
+    This function was previously called `load_test_data`, and it loaded the
+    entire featured file: all 100 engines, roughly 70 of which the models were
+    fitted on. Engine Analysis and Fleet Management both ran on it, so most of
+    what the dashboard scored and risk ranked was training data being presented
+    as held out.
+
+    Now it filters to the split recorded in splits.json, and the pages say which
+    split they are showing.
     """
     try:
         df = pd.read_csv(GOLD_DIR / 'FD001_featured.csv')
         feature_cols = _model_feature_columns()
         keep = ['engine_id', 'time_cycles'] + [c for c in feature_cols if c in df.columns]
-        return df[keep]
+        df = df[keep]
+
+        splits = load_splits()
+        if splits is None or split == 'all':
+            return df
+        return df[df['engine_id'].isin(splits[split])].reset_index(drop=True)
     except Exception as e:
-        st.error(f"Error loading test data: {e}")
+        st.error(f"Error loading evaluation data: {e}")
         return None
+
+
+@st.cache_data
+def load_raw_cycles():
+    """Cleaned raw sensor cycles, needed by the survival covariate builder."""
+    path = SILVER_DIR / 'FD001_cleaned.csv'
+    if not path.exists():
+        return None
+    return pd.read_csv(path)
 
 # Generate predictions
 def predict_rul(engine_data, models, model_type='lstm'):
@@ -264,19 +374,56 @@ def predict_rul(engine_data, models, model_type='lstm'):
         st.error(f"Error predicting RUL with {model_type}: {e}")
         return None
 
-# Calculate survival probability
-def calculate_survival_probability(rul, time_horizons=[25, 50, 75, 100]):
-    """Calculate survival probabilities using Weibull distribution"""
-    # Weibull parameters (fitted from training data)
-    shape = 2.5  # typical for wear-out failures
-    scale = rul * 1.2  # adjusted for scale
-    
-    probabilities = {}
-    for t in time_horizons:
-        prob = np.exp(-(t/scale)**shape)
-        probabilities[t] = prob
-    
-    return probabilities
+@st.cache_resource
+def load_survival_design():
+    """The standardiser and covariate list the survival models were fit with."""
+    path = MODELS_DIR / 'survival_design.joblib'
+    if not path.exists():
+        return None
+    return joblib.load(path)
+
+
+def calculate_survival_probability(engine_raw, models, time_horizons=(25, 50, 75, 100)):
+    """Survival probabilities from the fitted Weibull AFT model.
+
+    The previous version hardcoded a Weibull shape of 2.5 and a scale of
+    `rul * 1.2`, under a comment claiming the parameters were fitted from
+    training data. Nothing was fitted. Meanwhile waft.pkl sat on disk, loaded by
+    this dashboard and never used for anything.
+
+    This builds the same landmark covariates the model was trained on and asks
+    it. Returns None when the model or its inputs are unavailable, so the caller
+    can hide the section instead of drawing an invented curve.
+    """
+    design = load_survival_design()
+    model = models.get('weibull')
+    if design is None or model is None or engine_raw is None:
+        return None
+
+    try:
+        import survival
+
+        frame = survival.build_landmark_frame(
+            engine_raw,
+            landmark=design['landmark'],
+            window=design['window'],
+            horizon=design['horizon'],
+        )
+        if frame.empty:
+            # Engine has not run long enough to reach the landmark, so the
+            # survival model has nothing to say about it yet.
+            return None
+
+        covariates = design['covariates']
+        standardized = pd.DataFrame(
+            design['scaler'].transform(frame[covariates]),
+            columns=covariates, index=frame.index)
+
+        curve = model.predict_survival_function(standardized.iloc[[0]],
+                                                times=list(time_horizons))
+        return {int(t): float(curve.loc[t].iloc[0]) for t in time_horizons}
+    except Exception:
+        return None
 
 # Risk classification
 def classify_risk(rul):
@@ -367,14 +514,33 @@ def generate_new_prediction(raw_df, models, model_type='gradient_boosting'):
 
 
 
-# Ensemble prediction (weighted average based on validation R²)
-def predict_ensemble_rul(engine_data, models, metadata=None):
-    """Generate ensemble RUL prediction using weighted average of models
+def ensemble_weights(metrics, keys):
+    """Weights proportional to held out R2, computed rather than hardcoded.
 
-    Weights based on validation R²:
-    - LSTM: 0.8198 → weight = 0.45
-    - Gradient Boosting: 0.7999 → weight = 0.35
-    - Random Forest: 0.7989 → weight = 0.20
+    The old weights were frozen at 0.45 / 0.35 / 0.20 with a docstring
+    justifying them from numbers that have since changed. Deriving them means a
+    retrain updates the ensemble instead of silently invalidating it.
+
+    R2 is shifted by a floor below the weakest candidate so a model that is only
+    marginally better does not take a wildly larger share.
+    """
+    available = {k: metrics['models'][k]['test']['r2']
+                 for k in keys if k in metrics.get('models', {})}
+    if not available:
+        return {}
+
+    floor = min(available.values()) - 0.05
+    raw = {k: v - floor for k, v in available.items()}
+    total = sum(raw.values())
+    return {k: v / total for k, v in raw.items()}
+
+
+def predict_ensemble_rul(engine_data, models, metrics=None):
+    """Weighted average of the models that can score this input.
+
+    Weights come from held out R2 in the metrics artifact. Models that are not
+    loaded are dropped and the remaining weights renormalise, so a missing LSTM
+    degrades the ensemble instead of silently contributing a zero.
     """
     predictions = {}
 
@@ -400,34 +566,42 @@ def predict_ensemble_rul(engine_data, models, metadata=None):
         X_rf = engine_data.iloc[-1:].values
         predictions['random_forest'] = float(models['random_forest'].predict(X_rf)[0])
 
-    if not predictions:
+    if not predictions or metrics is None:
         return None
 
-    # Calculate weighted average
-    weights = {'lstm': 0.45, 'gradient_boosting': 0.35, 'random_forest': 0.20}
+    weights = ensemble_weights(metrics, list(predictions))
+    if not weights:
+        return None
 
-    ensemble_pred = sum(predictions.get(model, 0) * weights[model] for model in weights)
-    return max(0, ensemble_pred), predictions
+    ensemble_pred = sum(predictions[k] * w for k, w in weights.items())
+    return max(0, ensemble_pred), predictions, weights
 
-# Prediction intervals (using bootstrapping)
-def get_prediction_interval(rul_pred, confidence=0.95, uncertainty_scale=0.15):
-    """Generate prediction interval using bootstrapping
+def get_prediction_interval(rul_pred, model_key, metrics):
+    """95% prediction interval from the model's own held out residuals.
 
-    Args:
-    rul_pred: Point prediction
-    confidence: Confidence level (0.95 for 95% CI)
-    uncertainty_scale: Scale factor for interval width based on model uncertainty
+    The previous implementation drew random noise scaled off the prediction
+    itself, then used the 2.5th percentile for *both* bounds, producing a narrow
+    symmetric band that encoded nothing at all. It was labelled "95% Confidence"
+    in the UI.
 
-    Returns:
-    (lower_bound, upper_bound): 95% confidence interval
+    These quantiles are the actual test set errors recorded during training, so
+    the width reflects how wrong this model has really been on engines it had
+    not seen. Returns None when there is nothing to base an interval on, and
+    callers hide the section rather than substituting a made up one.
     """
-    # Simulate prediction error distribution (empirical bootstrap)
-    errors = np.random.normal(0, rul_pred * uncertainty_scale * 0.2, 1000)
+    if metrics is None:
+        return None
 
-    lower = rul_pred - np.percentile(np.abs(errors), (1 - confidence) / 2 * 100)
-    upper = rul_pred + np.percentile(np.abs(errors), (1 - confidence) / 2 * 100)
+    entry = metrics.get('models', {}).get(model_key)
+    if not entry or 'residuals_test' not in entry:
+        return None
 
-    return max(0, lower), upper
+    residuals = entry['residuals_test']
+    # residual = prediction - truth, so subtract to recover the plausible
+    # range for the truth given this prediction.
+    lower = rul_pred - residuals['p97.5']
+    upper = rul_pred - residuals['p2.5']
+    return max(0.0, lower), max(0.0, upper)
 
 
 # Main dashboard# SHAP explainability
@@ -481,6 +655,105 @@ def get_shap_explanations(engine_data, models, model_type='gradient_boosting', n
 
 
 
+# --------------------------------------------------------------------------
+# Shared rendering
+#
+# These three blocks were duplicated across three pages with slightly different
+# wording and, in the interval case, slightly different maths. One copy each.
+# --------------------------------------------------------------------------
+
+def render_prediction_interval(rul, interval, model_key):
+    """Show the 95% interval, or explain why there isn't one."""
+    st.markdown("---")
+    st.subheader("Prediction Interval (95%)")
+
+    if interval is None:
+        st.info(
+            "No interval available. Intervals come from the model's held out "
+            "residuals in metrics.json, so they need a completed training run."
+        )
+        return
+
+    lower, upper = interval
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Lower bound", f"{lower:.1f} cycles")
+    with col2:
+        st.metric("Point estimate", f"{rul:.1f} cycles")
+    with col3:
+        st.metric("Upper bound", f"{upper:.1f} cycles")
+
+    st.caption(
+        f"Width {upper - lower:.1f} cycles, from the 2.5th and 97.5th percentile "
+        f"of {display_name(model_key)}'s errors on held out engines. The band is "
+        "asymmetric because the model's errors are."
+    )
+
+
+def render_individual_predictions(individual_preds, weights):
+    """Per-model contributions to an ensemble prediction."""
+    if not individual_preds or not weights:
+        return
+
+    st.markdown("---")
+    st.subheader("Individual Model Predictions")
+
+    columns = st.columns(len(individual_preds))
+    for col, (key, value) in zip(columns, individual_preds.items()):
+        with col:
+            st.metric(f"{display_name(key)} ({weights.get(key, 0):.0%})",
+                      f"{value:.1f} cycles")
+
+    st.caption(
+        "Weights are proportional to held out R2, recomputed from metrics.json "
+        "on each load rather than fixed in the code."
+    )
+
+
+def render_survival_section(engine_raw, models, horizons=(10, 25, 50, 75, 100, 125)):
+    """Survival curve from the fitted Weibull model, or nothing."""
+    probabilities = calculate_survival_probability(engine_raw, models, horizons)
+
+    st.markdown("---")
+    st.subheader("Survival Probability")
+
+    if probabilities is None:
+        st.info(
+            "No survival curve for this engine. The Weibull model is fitted on a "
+            "landmark design and needs at least "
+            f"{load_survival_design()['landmark'] if load_survival_design() else 100} "
+            "cycles of history before it can say anything."
+        )
+        return
+
+    times = sorted(probabilities)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=times,
+        y=[probabilities[t] for t in times],
+        mode='lines+markers',
+        name='Survival probability',
+        line=dict(color='#1f77b4', width=3),
+        marker=dict(size=8),
+        fill='tozeroy',
+    ))
+    fig.add_hline(y=0.5, line_dash="dash", line_color="red",
+                  annotation_text="50% survival")
+    fig.update_layout(
+        title="Probability of surviving N more cycles past the landmark",
+        xaxis_title="Cycles",
+        yaxis_title="Survival probability",
+        yaxis_range=[0, 1],
+        hovermode='x unified',
+        height=400,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "From the fitted Weibull AFT model. Held out concordance is around 0.61, "
+        "so treat this as a ranking signal rather than a calibrated probability."
+    )
+
+
 def main():
     # Header
     st.markdown('<p class="main-header">Turbofan Engine Predictive Maintenance Dashboard</p>',
@@ -498,10 +771,15 @@ def main():
             metadata = None
             has_metadata = False
 
-        test_data = load_test_data()
+        metrics = require_metrics()
+        test_data = load_evaluation_data('test')
+        raw_cycles = load_raw_cycles()
 
     if models is None or test_data is None:
-        st.error("Failed to load models or data. Please check file paths.")
+        st.error(
+            "Could not load models or data. Run `python -m src.train` from the "
+            "repo root to generate them."
+        )
         return
 
     # Show model metadata in sidebar
@@ -511,18 +789,16 @@ def main():
             st.markdown("### Model Information")
 
             for model_name, info in metadata['models'].items():
-                with st.expander(f"{model_name.replace('_', ' ').title()}"):
-                    st.markdown(f"**Type:** {info['type']}")
-                    st.markdown(f"**Framework:** {info['framework']}")
+                with st.expander(display_name(model_name)):
+                    st.markdown(f"**Framework:** {info.get('framework', 'unknown')}")
+                    st.markdown(f"**Features:** {info.get('features', 'unknown')}")
 
-                    if 'metrics' in info:
-                        st.markdown("**Metrics:**")
-                        for metric, value in info['metrics'].items():
-                            if value is not None and value != '-':
-                                st.markdown(f"- {metric}: {value}")
+                    for metric, value in info.get('metrics', {}).items():
+                        if value is not None:
+                            st.markdown(f"- {metric}: {value}")
 
-                    st.markdown(f"**Description:** {info.get('description', 'N/A')}")
-                    st.markdown(f"**Trained:** {info['trained_date']}")
+                    st.markdown(f"**Description:** {info.get('description', '')}")
+                    st.markdown(f"**Trained:** {info.get('trained_date', 'unknown')}")
 
     # Dataset info
     if has_metadata and 'dataset' in metadata:
@@ -541,106 +817,138 @@ def main():
         st.markdown("## Navigation")
         page = st.selectbox(
             "Select Page",
-            ["Overview", "New Prediction", "Engine Analysis", "Model Comparison", "Fleet Management", "Performance Metrics"],
+            ["Overview", "New Prediction", "Engine Analysis", "Model Comparison",
+             "Fleet Management", "Performance Metrics", "Workflow"],
             index=0
         )
-    
-    # Model performance summary
-    model_performance = {
-        'LSTM': {'R²': 0.8198, 'MAE': 13.55, 'Type': 'Precision Predictor'},
-        'Gradient Boosting': {'R²': 0.7999, 'MAE': 13.30, 'Type': 'Strong Baseline'},
-        'Random Forest': {'R²': 0.7989, 'MAE': 13.79, 'Type': 'Interpretable'},
-        'Ridge': {'R²': 0.7854, 'MAE': 15.68, 'Type': 'Simple Baseline'},
-        'Weibull AFT': {'Concordance': 0.85, 'MAE': 15.8, 'Type': 'Best Risk Ranking'},
-        'Cox PH': {'Concordance': 0.804, 'MAE': 17.2, 'Type': 'Survival Analysis'}
-    }
-    
+
+        if splits := load_splits():
+            st.markdown("---")
+            st.caption(
+                f"Evaluation pages show the {len(splits['test'])} held out test "
+                f"engines. The models were fitted on {len(splits['train'])} others."
+            )
+
     # ==================== OVERVIEW PAGE ====================
     if page == "Overview":
         st.header("System Overview")
         
+        if metrics is None:
+            st.stop()
+
+        table = metrics_table(metrics, 'test')
+        best_key = best_model_key(metrics, 'test')
+        best = metrics['models'][best_key]
+        survival_metrics = metrics.get('survival', {})
+
         col1, col2, col3 = st.columns(3)
-        
+
         with col1:
             st.metric(
-                label="Best Prediction Model",
-                value="LSTM",
-                delta=f"R² = 0.8198"
+                label="Best model, held out test",
+                value=display_name(best_key),
+                delta=f"R2 = {best['test']['r2']:.3f}",
             )
-        
+
         with col2:
             st.metric(
-                label="Best Risk Ranking",
-                value="Weibull AFT",
-                delta=f"C-index = 0.85"
+                label="Typical error",
+                value=f"{best['test']['mae']:.1f} cycles",
+                delta=f"RMSE {best['test']['rmse']:.1f}",
+                delta_color="off",
             )
-        
+
         with col3:
-            st.metric(
-                label="Average Precision",
-                value="±13.6 cycles",
-                delta="-14% vs baseline"
-            )
-        
+            if survival_metrics:
+                ranked = max(survival_metrics.items(),
+                             key=lambda kv: kv[1]['test']['concordance'])
+                st.metric(
+                    label="Best risk ranking",
+                    value=display_name(ranked[0]),
+                    delta=f"C-index = {ranked[1]['test']['concordance']:.3f}",
+                    delta_color="off",
+                )
+            else:
+                st.metric(label="Best risk ranking", value="Not trained")
+
+        st.caption(
+            f"Scored on {metrics['split']['test']} engines held out of training "
+            f"and of model selection. Generated {metrics['generated']}."
+        )
+
         st.markdown("---")
 
-        # Model comparison table
         st.subheader("Model Performance Comparison")
-        
-        perf_df = pd.DataFrame([
-            {'Model': 'LSTM', 'Val R²': 0.8626, 'Test R²': 0.8198, 'MAE': 13.55, 
-             'Concordance': None, 'Key Strength': 'Best precision predictor'},
-            {'Model': 'Gradient Boosting', 'Val R²': 0.7999, 'Test R²': None, 'MAE': 13.30,
-             'Concordance': None, 'Key Strength': 'Strong baseline, interpretable'},
-            {'Model': 'Random Forest', 'Val R²': 0.7989, 'Test R²': None, 'MAE': 13.79,
-             'Concordance': None, 'Key Strength': 'Feature importance insights'},
-            {'Model': 'Ridge', 'Val R²': 0.7854, 'Test R²': None, 'MAE': 15.68,
-             'Concordance': None, 'Key Strength': 'Simple, stable baseline'},
-            {'Model': 'Weibull AFT', 'Val R²': None, 'Test R²': None, 'MAE': 15.8,
-             'Concordance': 0.85, 'Key Strength': 'Best risk ranking'},
-            {'Model': 'Cox PH', 'Val R²': None, 'Test R²': None, 'MAE': 17.2,
-             'Concordance': 0.804, 'Key Strength': 'Survival analysis'}
-        ])
-        
-        st.dataframe(perf_df, use_container_width=True, hide_index=True)
-        
+
+        comparison = pd.DataFrame([{
+            'Model': display_name(key),
+            'Validation R2': round(m['validation']['r2'], 4),
+            'Test R2': round(m['test']['r2'], 4),
+            'Test MAE': round(m['test']['mae'], 2),
+            'Test RMSE': round(m['test']['rmse'], 2),
+            'Role': MODEL_ROLES.get(key, ''),
+        } for key, m in metrics['models'].items()]).sort_values(
+            'Test R2', ascending=False)
+
+        st.dataframe(comparison, use_container_width=True, hide_index=True)
+
+        st.markdown(
+            "Validation selected the hyperparameters and the preferred model. "
+            "Test was scored once, afterwards. The gap between the two columns "
+            "is the cost of having selected on validation, which is why both "
+            "are shown rather than only the better one."
+        )
+
+        if survival_metrics:
+            st.markdown("**Survival models** (concordance index, held out engines)")
+            st.dataframe(pd.DataFrame([{
+                'Model': display_name(key),
+                'Validation C': round(m['validation']['concordance'], 3),
+                'Test C': round(m['test']['concordance'], 3),
+            } for key, m in survival_metrics.items()]),
+                use_container_width=True, hide_index=True)
+            st.caption(
+                "0.5 is random ranking. With 15 engines per split the estimate "
+                "is noisy, and the validation and test columns differ by more "
+                "than the gap between the two models."
+            )
+
         st.markdown("---")
 
-        # Decision framework
-        st.subheader("Three-Tier Decision Framework")
-        
+        st.subheader("Which Model For Which Question")
+
         col1, col2, col3 = st.columns(3)
-        
+
         with col1:
             st.markdown("""
             <div class="success-box">
-            <h4>Priority Ranking</h4>
+            <h4>Priority ranking</h4>
+            <p><b>Question:</b> which engines need attention first?</p>
             <p><b>Model:</b> Weibull AFT</p>
-            <p><b>Metric:</b> C-index 0.85</p>
-            <p><b>Use Case:</b> "Which engines need attention first?"</p>
-            <p><i>Best for resource allocation</i></p>
+            <p><i>Ranks the fleet by risk. Does not need an accurate
+            point estimate to be useful.</i></p>
             </div>
             """, unsafe_allow_html=True)
 
         with col2:
-            st.markdown("""
+            st.markdown(f"""
             <div class="warning-box">
-            <h4>Precise Scheduling</h4>
-            <p><b>Model:</b> LSTM</p>
-            <p><b>Metric:</b> MAE 13.6 cycles</p>
-            <p><b>Use Case:</b> "When exactly will Engine #47 fail?"</p>
-            <p><i>Best for maintenance windows</i></p>
+            <h4>Scheduling</h4>
+            <p><b>Question:</b> when will this engine need service?</p>
+            <p><b>Model:</b> {display_name(best_key)}</p>
+            <p><i>Lowest held out error, {best['test']['mae']:.1f} cycles MAE.
+            Use the interval, not the point.</i></p>
             </div>
             """, unsafe_allow_html=True)
 
         with col3:
             st.markdown("""
             <div class="metric-card">
-            <h4>Risk Quantification</h4>
-            <p><b>Model:</b> Weibull AFT</p>
-            <p><b>Metric:</b> Survival curves</p>
-            <p><b>Use Case:</b> "What's the failure probability in 50 cycles?"</p>
-            <p><i>Best for risk assessment</i></p>
+            <h4>Risk over a horizon</h4>
+            <p><b>Question:</b> chance of failure in the next 50 cycles?</p>
+            <p><b>Model:</b> Weibull AFT survival curve</p>
+            <p><i>A probability over a window, which is what a
+            maintenance interval actually needs.</i></p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -686,7 +994,7 @@ def main():
                     with col2:
                         st.metric("Total Cycles", info['total_cycles'])
                     with col3:
-                        status = "✓ Yes" if info['can_use_lstm'] else "✗ No"
+                        status = "Yes" if info['can_use_lstm'] else "No"
                         st.metric("Can Use LSTM", status)
 
                     # Select model
@@ -719,24 +1027,29 @@ def main():
                             model_cols = _model_feature_columns()
                             engine_features = engineer_for_prediction(first_engine)[model_cols]
 
-                            ensemble_result = predict_ensemble_rul(engine_features, models)
+                            ensemble_result = predict_ensemble_rul(engine_features, models, metrics)
                             if ensemble_result:
-                                rul, individual_preds = ensemble_result
+                                rul, individual_preds, ens_weights = ensemble_result
+                                interval_key = best_model_key(metrics) if metrics else None
                             else:
-                                rul, individual_preds = None, None
+                                rul, individual_preds, ens_weights = None, None, None
+                                interval_key = None
                         else:
-                            rul, latest_data = generate_new_prediction(df, models, model_type if not use_ensemble else 'gradient_boosting')
+                            resolved = model_type if not use_ensemble else 'gradient_boosting'
+                            rul, latest_data = generate_new_prediction(df, models, resolved)
                             individual_preds = None
+                            ens_weights = None
+                            interval_key = resolved
 
                         if rul is not None:
                             risk_label, risk_class = classify_risk(rul)
-                            
-                            # Get prediction interval
-                            lower_ci, upper_ci = get_prediction_interval(rul)
+
+                            # Interval from this model's held out residuals.
+                            interval = get_prediction_interval(rul, interval_key, metrics)
 
                             # Display results
                             st.markdown("---")
-                            st.subheader("📊 Prediction Results")
+                            st.subheader("Prediction Results")
 
                             col1, col2, col3 = st.columns(3)
 
@@ -778,63 +1091,10 @@ def main():
                                     "Ensemble - Best" if use_ensemble else model_type.replace('_', ' ').title()
                                 )
 
-                            # Prediction interval
-                            st.markdown("---")
-                            st.subheader("Prediction Interval (95% Confidence)")
-                            
-                            ci_col1, ci_col2, ci_col3 = st.columns(3)
-                            with ci_col1:
-                                st.metric("Lower Bound", f"{lower_ci:.1f} cycles")
-                            with ci_col2:
-                                st.metric("Point Estimate", f"{rul:.1f} cycles")
-                            with ci_col3:
-                                st.metric("Upper Bound", f"{upper_ci:.1f} cycles")
-                            
-                            st.caption(f"Confidence interval width: {upper_ci - lower_ci:.1f} cycles")
-                            
-                            # Individual model predictions for ensemble
-                            if individual_preds:
-                                st.markdown("---")
-                                st.subheader("Individual Model Predictions")
-                                
-                                pred_col1, pred_col2, pred_col3 = st.columns(3)
-                                with pred_col1:
-                                    st.metric("LSTM (45% weight)", f"{individual_preds.get('lstm', 0):.1f} cycles")
-                                with pred_col2:
-                                    st.metric("Gradient Boosting (35% weight)", f"{individual_preds.get('gradient_boosting', 0):.1f} cycles")
-                                with pred_col3:
-                                    st.metric("Random Forest (20% weight)", f"{individual_preds.get('random_forest', 0):.1f} cycles")
+                            render_prediction_interval(rul, interval, interval_key)
+                            render_individual_predictions(individual_preds, ens_weights)
+                            render_survival_section(df, models)
 
-                            # Survival probability
-                            st.subheader("Survival Probability")
-                            time_horizons = [10, 25, 50, 75, 100, 125, 150]
-                            survival_probs = calculate_survival_probability(rul, time_horizons)
-
-                            fig_survival = go.Figure()
-                            fig_survival.add_trace(go.Scatter(
-                                x=time_horizons,
-                                y=[survival_probs.get(t, 0) for t in time_horizons],
-                                mode='lines+markers',
-                                name='Survival Probability',
-                                line=dict(color='#1f77b4', width=3),
-                                marker=dict(size=8),
-                                fill='tozeroy'
-                            ))
-                            fig_survival.add_hline(
-                                y=0.5,
-                                line_dash="dash",
-                                line_color="red",
-                                annotation_text="50% Survival Threshold"
-                            )
-                            fig_survival.update_layout(
-                                title="Probability of Surviving N More Cycles",
-                                xaxis_title="Cycles",
-                                yaxis_title="Survival Probability",
-                                hovermode='x unified',
-                                height=400
-                            )
-                            st.plotly_chart(fig_survival, use_container_width=True)
-                            
                             # SHAP explainability
                             shap_model = 'gradient_boosting' if use_ensemble else model_type
                             if shap_model in ['gradient_boosting', 'random_forest', 'ridge']:
@@ -949,7 +1209,7 @@ def main():
 
                     # Display results
                     st.markdown("---")
-                    st.subheader("📊 Prediction Results")
+                    st.subheader("Prediction Results")
 
                     col1, col2 = st.columns(2)
 
@@ -982,22 +1242,10 @@ def main():
                     with col2:
                         st.metric("Expected Failure", f"In ~{rul:.0f} cycles")
                     
-                    # Prediction interval
-                    st.markdown("---")
-                    st.subheader("📊 Prediction Interval (95% Confidence)")
-                    
-                    lower_ci, upper_ci = get_prediction_interval(rul)
-                    
-                    ci_col1, ci_col2, ci_col3 = st.columns(3)
-                    with ci_col1:
-                        st.metric("Lower Bound", f"{lower_ci:.1f} cycles")
-                    with ci_col2:
-                        st.metric("Point Estimate", f"{rul:.1f} cycles")
-                    with ci_col3:
-                        st.metric("Upper Bound", f"{upper_ci:.1f} cycles")
-                    
-                    st.caption(f"Confidence interval width: {upper_ci - lower_ci:.1f} cycles")
-                    
+                    render_prediction_interval(
+                        rul, get_prediction_interval(rul, 'gradient_boosting', metrics),
+                        'gradient_boosting')
+
                     # SHAP explainability
                     st.markdown("---")
                     st.subheader("Feature Importance (SHAP)")
@@ -1022,38 +1270,14 @@ def main():
                         
                         st.caption("Higher importance values indicate greater influence on the prediction")
 
-                    # Survival probability
-                    st.subheader("📈 Survival Probability")
-                    time_horizons = [10, 25, 50, 75, 100, 125, 150]
-                    survival_probs = calculate_survival_probability(rul, time_horizons)
-
-                    fig_survival = go.Figure()
-                    fig_survival.add_trace(go.Scatter(
-                        x=time_horizons,
-                        y=[survival_probs.get(t, 0) for t in time_horizons],
-                        mode='lines+markers',
-                        name='Survival Probability',
-                        line=dict(color='#1f77b4', width=3),
-                        marker=dict(size=8),
-                        fill='tozeroy'
-                    ))
-                    fig_survival.add_hline(
-                        y=0.5,
-                        line_dash="dash",
-                        line_color="red",
-                        annotation_text="50% Survival Threshold"
-                    )
-                    fig_survival.update_layout(
-                        title="Probability of Surviving N More Cycles",
-                        xaxis_title="Cycles",
-                        yaxis_title="Survival Probability",
-                        hovermode='x unified',
-                        height=400
-                    )
-                    st.plotly_chart(fig_survival, use_container_width=True)
+                    # Manual entry synthesises a steady-state history, which
+                    # never reaches the survival model's landmark, so this
+                    # correctly renders the "not enough history" message rather
+                    # than a fabricated curve.
+                    render_survival_section(df, models)
 
                     # Maintenance recommendation
-                    st.subheader("🔧 Maintenance Recommendation")
+                    st.subheader("Maintenance Recommendation")
 
                     if rul < 30:
                         st.error(f"""
@@ -1103,76 +1327,43 @@ def main():
             st.subheader("RUL Predictions from All Models")
             
             # Get ensemble prediction
-            ensemble_result = predict_ensemble_rul(engine_features, models)
+            ensemble_result = predict_ensemble_rul(engine_features, models, metrics)
             if ensemble_result:
-                ensemble_rul, individual_preds = ensemble_result
+                ensemble_rul, individual_preds, ens_weights = ensemble_result
             else:
                 ensemble_rul = predict_rul(engine_features, models, 'lstm')
                 individual_preds = {'lstm': ensemble_rul}
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
+                ens_weights = {'lstm': 1.0}
+
+            columns = st.columns(1 + len(individual_preds))
+
+            with columns[0]:
                 ensemble_risk_label, ensemble_risk_class = classify_risk(ensemble_rul)
-                
-                if ensemble_risk_class == "critical":
-                    st.markdown(f"""
-                    <div class="critical-box">
-                    <h3>Ensemble ★</h3>
-                    <h2>{ensemble_rul:.1f} cycles</h2>
-                    <p>{ensemble_risk_label}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                elif ensemble_risk_class == "warning":
-                    st.markdown(f"""
-                    <div class="warning-box">
-                    <h3>Ensemble ★</h3>
-                    <h2>{ensemble_rul:.1f} cycles</h2>
-                    <p>{ensemble_risk_label}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class="success-box">
-                    <h3>Ensemble ★</h3>
-                    <h2>{ensemble_rul:.1f} cycles</h2>
-                    <p>{ensemble_risk_label}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            with col2:
-                lstm_rul = individual_preds.get('lstm', predict_rul(engine_features, models, 'lstm'))
-                st.metric("LSTM (45%)", f"{lstm_rul:.1f} cycles",
-                         delta=f"{lstm_rul - ensemble_rul:+.1f} vs Ensemble")
-            
-            with col3:
-                gb_rul = individual_preds.get('gradient_boosting', predict_rul(engine_features, models, 'gradient_boosting'))
-                st.metric("GB (35%)", f"{gb_rul:.1f} cycles", 
-                         delta=f"{gb_rul - ensemble_rul:+.1f} vs Ensemble")
-            
-            with col4:
-                rf_rul = individual_preds.get('random_forest', predict_rul(engine_features, models, 'random_forest'))
-                st.metric("RF (20%)", f"{rf_rul:.1f} cycles",
-                         delta=f"{rf_rul - ensemble_rul:+.1f} vs Ensemble")
-            
+                box = {'critical': 'critical-box', 'warning': 'warning-box'}.get(
+                    ensemble_risk_class, 'success-box')
+                st.markdown(f"""
+                <div class="{box}">
+                <h3>Ensemble</h3>
+                <h2>{ensemble_rul:.1f} cycles</h2>
+                <p>{ensemble_risk_label}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            for col, (key, value) in zip(columns[1:], individual_preds.items()):
+                with col:
+                    st.metric(f"{display_name(key)} ({ens_weights.get(key, 0):.0%})",
+                              f"{value:.1f} cycles",
+                              delta=f"{value - ensemble_rul:+.1f} vs ensemble",
+                              delta_color="off")
+
             st.markdown("---")
 
-            # Prediction interval
-            st.subheader("Prediction Interval (95% Confidence)")
-            lower_ci, upper_ci = get_prediction_interval(ensemble_rul)
-            
-            pi_col1, pi_col2, pi_col3, pi_col4 = st.columns(4)
-            with pi_col1:
-                st.metric("Lower Bound", f"{lower_ci:.1f} cycles")
-            with pi_col2:
-                st.metric("Point Estimate", f"{ensemble_rul:.1f} cycles")
-            with pi_col3:
-                st.metric("Upper Bound", f"{upper_ci:.1f} cycles")
-            with pi_col4:
-                st.metric("CI Width", f"{upper_ci - lower_ci:.1f} cycles")
-            
-            st.caption(f"We use a 95% confidence interval. Engines failing before {lower_ci:.0f} cycles are unlikely, while failures after {upper_ci:.0f} cycles are also unlikely.")
-            
+            render_prediction_interval(
+                ensemble_rul,
+                get_prediction_interval(ensemble_rul, best_model_key(metrics), metrics)
+                if metrics else None,
+                best_model_key(metrics) if metrics else None)
+
             st.markdown("---")
 
             # SHAP explainability
@@ -1212,40 +1403,19 @@ def main():
             
             st.markdown("---")
 
-            # Survival probability analysis
-            st.subheader("Survival Probability Analysis")
-            
-            time_horizons = [10, 25, 50, 75, 100, 125, 150]
-            survival_probs = calculate_survival_probability(lstm_rul, time_horizons)
-            
-            # Create survival curve
-            fig_survival = go.Figure()
-            
-            fig_survival.add_trace(go.Scatter(
-                x=time_horizons,
-                y=[survival_probs.get(t, 0) for t in time_horizons],
-                mode='lines+markers',
-                name='Survival Probability',
-                line=dict(color='#1f77b4', width=3),
-                marker=dict(size=8)
-            ))
-            
-            fig_survival.add_hline(y=0.5, line_dash="dash", line_color="red",
-                                  annotation_text="50% Survival Threshold")
-            
-            fig_survival.update_layout(
-                title="Survival Probability Over Time",
-                xaxis_title="Time Horizon (cycles)",
-                yaxis_title="Survival Probability",
-                hovermode='x unified',
-                height=400
-            )
-            
-            st.plotly_chart(fig_survival, use_container_width=True)
-            
+            # Survival curve for this engine, from its own raw cycle history.
+            engine_raw = (raw_cycles[raw_cycles['engine_id'] == selected_engine]
+                          if raw_cycles is not None else None)
+            render_survival_section(engine_raw, models)
+
+            lstm_rul = individual_preds.get(
+                'lstm', predict_rul(engine_features, models, 'lstm'))
+
+            st.markdown("---")
+
             # Maintenance recommendations
-            st.subheader("🔧 Maintenance Recommendations")
-            
+            st.subheader("Maintenance Recommendations")
+
             if lstm_rul < 30:
                 st.error(f"""
                 **IMMEDIATE ACTION REQUIRED**
@@ -1310,79 +1480,95 @@ def main():
         # Performance metrics visualization
         st.subheader("Prediction Accuracy Comparison")
         
-        models_for_plot = ['Ridge', 'Random Forest', 'Gradient Boosting', 'LSTM']
-        r2_scores = [0.7854, 0.7989, 0.7999, 0.8198]
-        mae_scores = [15.68, 13.79, 13.30, 13.55]
-        
+        if metrics is None:
+            st.stop()
+
+        table = metrics_table(metrics, 'test')
+
         fig_comparison = make_subplots(
             rows=1, cols=2,
-            subplot_titles=("R² Score Comparison", "MAE Comparison (Lower is Better)")
+            subplot_titles=("Test R2 (higher is better)",
+                            "Test MAE in cycles (lower is better)")
         )
-        
         fig_comparison.add_trace(
-            go.Bar(x=models_for_plot, y=r2_scores, name='R² Score',
-                  marker_color=['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4']),
-            row=1, col=1
-        )
-        
+            go.Bar(x=table['Model'], y=table['R2'], marker_color='#1f77b4'),
+            row=1, col=1)
         fig_comparison.add_trace(
-            go.Bar(x=models_for_plot, y=mae_scores, name='MAE',
-                  marker_color=['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4']),
-            row=1, col=2
-        )
-        
-        fig_comparison.update_layout(height=400, showlegend=False)
-        fig_comparison.update_yaxes(title_text="R² Score", row=1, col=1)
+            go.Bar(x=table['Model'], y=table['MAE'], marker_color='#ff7f0e'),
+            row=1, col=2)
+        fig_comparison.update_layout(height=420, showlegend=False)
+        fig_comparison.update_yaxes(title_text="R2", row=1, col=1)
         fig_comparison.update_yaxes(title_text="MAE (cycles)", row=1, col=2)
-        
         st.plotly_chart(fig_comparison, use_container_width=True)
-        
-        # Improvement over baseline
-        st.subheader("Performance Evolution")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            improvement = ((15.68 - 13.55) / 15.68) * 100
-            st.metric(
-                "MAE Improvement (Ridge → LSTM)",
-                f"{improvement:.1f}%",
-                delta=f"-{15.68 - 13.55:.2f} cycles"
+
+        st.markdown("---")
+        st.subheader("Validation Against Test")
+
+        gap = pd.DataFrame([{
+            'Model': display_name(key),
+            'Validation R2': m['validation']['r2'],
+            'Test R2': m['test']['r2'],
+            'Gap': m['validation']['r2'] - m['test']['r2'],
+        } for key, m in metrics['models'].items()]).sort_values(
+            'Test R2', ascending=False)
+
+        fig_gap = go.Figure()
+        fig_gap.add_trace(go.Bar(x=gap['Model'], y=gap['Validation R2'],
+                                 name='Validation', marker_color='#aec7e8'))
+        fig_gap.add_trace(go.Bar(x=gap['Model'], y=gap['Test R2'],
+                                 name='Test', marker_color='#1f77b4'))
+        fig_gap.update_layout(barmode='group', height=400, yaxis_title='R2')
+        st.plotly_chart(fig_gap, use_container_width=True)
+
+        st.markdown(
+            "Validation picked the hyperparameters and the preferred model, so "
+            "its score is optimistic by construction. Test was scored once, "
+            "after every choice had been made. Reporting the validation number "
+            "as if it estimated generalisation is the single most common way "
+            "these projects overstate themselves."
+        )
+
+        st.markdown("---")
+        st.subheader("Improvement Over the Linear Baseline")
+
+        if 'linear_regression' in metrics['models']:
+            baseline = metrics['models']['linear_regression']['test']
+            best = metrics['models'][best_model_key(metrics)]['test']
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(
+                    "MAE reduction vs linear regression",
+                    f"{(baseline['mae'] - best['mae']) / baseline['mae'] * 100:.1f}%",
+                    delta=f"{best['mae'] - baseline['mae']:.2f} cycles",
+                )
+            with col2:
+                st.metric(
+                    "R2 gain vs linear regression",
+                    f"{best['r2'] - baseline['r2']:+.4f}",
+                    delta=f"from {baseline['r2']:.4f} to {best['r2']:.4f}",
+                    delta_color="off",
+                )
+
+            st.caption(
+                "The baseline exists to make the complex models justify their "
+                "cost. That gap is real but modest, which is worth knowing "
+                "before reaching for a sequence model in production."
             )
-        
-        with col2:
-            r2_improvement = ((0.8198 - 0.7854) / 0.7854) * 100
-            st.metric(
-                "R² Improvement (Ridge → LSTM)",
-                f"{r2_improvement:.1f}%",
-                delta=f"+{0.8198 - 0.7854:.4f}"
-            )
-        
-        # Model strengths
-        st.subheader("Model Strengths & Use Cases")
-        
-        strengths_data = {
-            'Model': ['LSTM', 'Gradient Boosting', 'Random Forest', 'Weibull AFT', 'Cox PH', 'Ridge'],
-            'Primary Strength': [
-                'Highest precision predictions',
-                'Strong balance of accuracy/speed',
-                'Feature importance analysis',
-                'Risk ranking & survival analysis',
-                'Proportional hazards modeling',
-                'Stable baseline & interpretability'
-            ],
-            'Best For': [
-                'Precise maintenance scheduling',
-                'Real-time predictions',
-                'Understanding key sensors',
-                'Priority ranking engines',
-                'Time-dependent risk assessment',
-                'Quick initial estimates'
-            ],
-            'Computational Cost': ['High', 'Medium', 'Medium', 'Low', 'Low', 'Very Low']
-        }
-        
-        st.dataframe(pd.DataFrame(strengths_data), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("Trade-offs")
+
+        st.dataframe(
+            table[['Model', 'R2', 'MAE', 'RMSE', 'NASA score', 'Role']].round(3),
+            use_container_width=True, hide_index=True)
+
+        st.caption(
+            "NASA score is the CMAPSS asymmetric penalty: late predictions cost "
+            "more than early ones, because an optimistic error is the one that "
+            "strands an aircraft. Note it does not always rank models the same "
+            "way R2 does."
+        )
     
     # ==================== FLEET MANAGEMENT PAGE ====================
     elif page == "Fleet Management":
@@ -1476,9 +1662,10 @@ def main():
                 else:
                     return 'background-color: #d4edda'
 
-            styled_df = priority_df[['Engine ID', 'LSTM RUL', 'Risk Level', 'Cycles Remaining']].style.applymap(
-                color_risk, subset=['Risk Level']
-            )
+            # Styler.map, not applymap: the latter was removed in pandas 3.
+            styled_df = priority_df[
+                ['Engine ID', 'LSTM RUL', 'Risk Level', 'Cycles Remaining']
+            ].style.map(color_risk, subset=['Risk Level'])
             
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
             
@@ -1506,504 +1693,258 @@ def main():
     # ==================== PERFORMANCE METRICS PAGE ====================
     elif page == "Performance Metrics":
         st.header("Detailed Performance Analysis")
-        
-        # Model performance table
-        st.subheader("Comprehensive Model Metrics")
-        
-        metrics_df = pd.DataFrame([
-            {
-                'Model': 'LSTM',
-                'Model Type': 'Deep Learning',
-                'R² Score': 0.8198,
-                'MAE (cycles)': 13.55,
-                'Concordance Index': None,
-                'Training Time': 'High',
-                'Inference Speed': 'Fast',
-                'Interpretability': 'Low'
-            },
-            {
-                'Model': 'Gradient Boosting',
-                'Model Type': 'Tree Ensemble',
-                'R² Score': 0.7999,
-                'MAE (cycles)': 13.30,
-                'Concordance Index': None,
-                'Training Time': 'Medium',
-                'Inference Speed': 'Fast',
-                'Interpretability': 'High'
-            },
-            {
-                'Model': 'Random Forest',
-                'Model Type': 'Tree Ensemble',
-                'R² Score': 0.7989,
-                'MAE (cycles)': 13.79,
-                'Concordance Index': None,
-                'Training Time': 'Medium',
-                'Inference Speed': 'Fast',
-                'Interpretability': 'High'
-            },
-            {
-                'Model': 'Ridge Regression',
-                'Model Type': 'Linear',
-                'R² Score': 0.7854,
-                'MAE (cycles)': 15.68,
-                'Concordance Index': None,
-                'Training Time': 'Low',
-                'Inference Speed': 'Very Fast',
-                'Interpretability': 'Very High'
-            },
-            {
-                'Model': 'Weibull AFT',
-                'Model Type': 'Survival Analysis',
-                'R² Score': None,
-                'MAE (cycles)': 15.8,
-                'Concordance Index': 0.85,
-                'Training Time': 'Low',
-                'Inference Speed': 'Fast',
-                'Interpretability': 'Medium'
-            },
-            {
-                'Model': 'Cox PH',
-                'Model Type': 'Survival Analysis',
-                'R² Score': None,
-                'MAE (cycles)': 17.2,
-                'Concordance Index': 0.804,
-                'Training Time': 'Low',
-                'Inference Speed': 'Fast',
-                'Interpretability': 'Medium'
-            }
-        ])
-        
-        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-        
-        # Performance visualization
-        st.subheader("Model Trade-offs")
-        
-        # Create radar chart for model comparison
-        categories = ['Accuracy', 'Speed', 'Interpretability', 'Robustness']
-        
-        fig_radar = go.Figure()
-        
-        # LSTM
-        fig_radar.add_trace(go.Scatterpolar(
-            r=[95, 80, 30, 90],
-            theta=categories,
-            fill='toself',
-            name='LSTM'
-        ))
-        
-        # Gradient Boosting
-        fig_radar.add_trace(go.Scatterpolar(
-            r=[85, 85, 80, 85],
-            theta=categories,
-            fill='toself',
-            name='Gradient Boosting'
-        ))
-        
-        # Weibull AFT
-        fig_radar.add_trace(go.Scatterpolar(
-            r=[75, 90, 70, 80],
-            theta=categories,
-            fill='toself',
-            name='Weibull AFT'
-        ))
-        
-        fig_radar.update_layout(
-            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-            showlegend=True,
-            height=500
+
+        if metrics is None:
+            st.stop()
+
+        table = metrics_table(metrics, 'test')
+
+        st.subheader("Held Out Test Metrics")
+        st.dataframe(
+            table[['Model', 'R2', 'MAE', 'RMSE', 'NASA score']].round(3),
+            use_container_width=True, hide_index=True)
+
+        st.caption(
+            f"{metrics['split']['test']} engines, {metrics['n_features']} features, "
+            f"seed {metrics['seed']}. Generated {metrics['generated']}."
         )
-        
-        st.plotly_chart(fig_radar, use_container_width=True)
-        
-        # Key insights
-        st.subheader("Key Performance Insights")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-            ### Accuracy Leaders
-            - **LSTM**: Best R² (0.82) - 2.5% over Gradient Boosting
-            - **Weibull AFT**: Best concordance (0.85) for risk ranking
-            - **Gradient Boosting**: Strong runner-up with good speed
-            """)
 
-        with col2:
-            st.markdown("""
-            ### Speed & Efficiency
-            - **Ridge**: Fastest inference, lowest training time
-            - **Survival Models**: Low computational cost, fast predictions
-            - **LSTM**: Higher training cost but fast inference
-            """)
-        
-        # Error analysis
-        st.subheader("Error Analysis")
-        
-        st.markdown("""
-        ### Prediction Error Breakdown
-        
-        | Model | MAE | RMSE (Est.) | 90th Percentile Error |
-        |-------|-----|-------------|----------------------|
-        | LSTM | 13.55 | ~17.8 | ~22 cycles |
-        | Gradient Boosting | 13.30 | ~18.6 | ~32 cycles |
-        | Random Forest | 13.79 | ~18.7 | ~32 cycles |
-        | Ridge | 15.68 | ~19.3 | ~32 cycles |
-        | Weibull AFT | 15.8 | ~21.3 | ~26 cycles |
-        
-        **Interpretation**: LSTM provides the tightest prediction intervals, with 90% of predictions 
-        within ±22 cycles of actual RUL.
-        """)
-        
-        # Model recommendations
-        st.subheader("Model Selection Guide")
-        
-        st.markdown("""
-        ### When to Use Each Model:
+        st.markdown("---")
+        st.subheader("Error Distribution")
 
-        **LSTM** - Use when:
-        - Highest precision is required
-        - Maintenance windows are tight
-        - Computational resources are available
-        - Historical sensor sequences are important
+        st.markdown(
+            "These are the residual quantiles measured on held out engines, and "
+            "they are what the prediction intervals elsewhere in this dashboard "
+            "are built from. A positive residual means the model predicted more "
+            "remaining life than the engine had, which is the dangerous direction."
+        )
 
-        **Weibull AFT** - Use when:
-        - Need to rank multiple engines by urgency
-        - Resource allocation decisions
-        - Risk probability estimates needed
-        - Interpretable survival curves required
+        residual_rows = []
+        for key, m in metrics['models'].items():
+            r = m.get('residuals_test')
+            if not r:
+                continue
+            residual_rows.append({
+                'Model': display_name(key),
+                'p2.5': round(r['p2.5'], 1),
+                'Median': round(r['p50'], 1),
+                'p97.5': round(r['p97.5'], 1),
+                'Std': round(r['std'], 1),
+                'Interval width': round(r['p97.5'] - r['p2.5'], 1),
+            })
 
-        **Gradient Boosting** - Use when:
-        - Balance between accuracy and speed needed
-        - Feature importance analysis required
-        - Real-time predictions in production
-        - Good baseline with interpretability
+        if residual_rows:
+            residuals = pd.DataFrame(residual_rows)
+            st.dataframe(residuals, use_container_width=True, hide_index=True)
 
-        **Cox PH** - Use when:
-        - Time-dependent covariate effects needed
-        - Proportional hazards assumption holds
-        - Comparative risk analysis required
+            fig_resid = go.Figure()
+            for row in residual_rows:
+                fig_resid.add_trace(go.Bar(
+                    x=[row['Interval width']], y=[row['Model']],
+                    orientation='h', name=row['Model'], showlegend=False,
+                    marker_color='#1f77b4'))
+            fig_resid.update_layout(
+                height=340,
+                xaxis_title='95% interval width (cycles)',
+                title='Narrower is more useful, provided it is honest')
+            st.plotly_chart(fig_resid, use_container_width=True)
 
-        **Ridge Regression** - Use when:
-        - Quick initial estimates needed
-        - Maximum interpretability required
-        - Computational resources limited
-        - Simple deployment required
-        """)
-
-    # ==================== WORKFLOW PAGE ====================
-    elif page == "📚 Workflow":
-        st.header("How We Got Here: End-to-End Pipeline")
-
-        st.markdown("""
-        This dashboard is the result of a comprehensive predictive maintenance pipeline
-        that transforms raw sensor data into actionable maintenance insights.
-        """)
-
-        # Pipeline overview
-        st.subheader("Pipeline Overview")
-
-        pipeline_steps = [
-            {
-                'Step': '1️⃣ Data Ingestion',
-                'Task': 'Load and parse CMAPSS dataset',
-                'Output': 'Raw sensor readings',
-                'Details': 'NASA CMAPSS FD001 dataset with 100 engines, 20,631 records'
-            },
-            {
-                'Step': '2️⃣ Exploratory Analysis',
-                'Task': 'Understand sensor patterns',
-                'Output': 'Insights on degradation',
-                'Details': 'Identify sensor drift, noise, and failure signatures'
-            },
-            {
-                'Step': '3️⃣ Feature Engineering',
-                'Task': 'Create predictive features',
-                'Output': 'Enhanced feature set',
-                'Details': 'Rolling windows, lags, trends, EWMA for temporal patterns'
-            },
-            {
-                'Step': '4️⃣ Model Training',
-                'Task': 'Train multiple model types',
-                'Output': 'Trained models',
-                'Details': 'Linear, ensemble, survival, and deep learning models'
-            },
-            {
-                'Step': '5️⃣ Model Evaluation',
-                'Task': 'Assess model performance',
-                'Output': 'Performance metrics',
-                'Details': 'R², MAE, RMSE, Concordance scores'
-            },
-            {
-                'Step': '6️⃣ Deployment',
-                'Task': 'Deploy to production',
-                'Output': 'Interactive dashboard',
-                'Details': 'Streamlit app with real-time predictions'
-            }
-        ]
-
-        # Create pipeline visualization
-        nodes_y = list(range(len(pipeline_steps), 0, -1))
-        nodes_x = [3] * len(pipeline_steps)
-
-        fig_pipeline = go.Figure()
-
-        fig_pipeline.add_trace(go.Scatter(
-            x=nodes_x,
-            y=nodes_y,
-            mode='markers+text',
-            marker=dict(size=40, color='#1f77b4', line=dict(width=2, color='white')),
-            text=[step['Step'] for step in pipeline_steps],
-            textposition='middle center',
-            textfont=dict(size=10, color='white'),
-            name='Pipeline Steps'
-        ))
-
-        # Add arrows
-        for i in range(len(pipeline_steps) - 1):
-            fig_pipeline.add_annotation(
-                x=3,
-                y=nodes_y[i] - 0.5,
-                ax=3,
-                ay=nodes_y[i + 1] + 0.5,
-                arrowhead=2,
-                arrowsize=1.5,
-                arrowwidth=2,
-                arrowcolor='#1f77b4'
+            st.caption(
+                "A median residual away from zero means the model is biased in "
+                "that direction, which matters more than the width for planning."
             )
 
-        fig_pipeline.update_layout(
-            title='Predictive Maintenance Pipeline',
-            xaxis=dict(showgrid=False, showticklabels=False, zeroline=False),
-            yaxis=dict(showgrid=False, showticklabels=False, zeroline=False),
-            height=600,
-            showlegend=False,
-            plot_bgcolor='rgba(0,0,0,0)'
+        st.markdown("---")
+        st.subheader("Cost and Interpretability")
+
+        st.markdown(
+            "Accuracy is not the only axis, and the table above deliberately "
+            "does not rank on it alone."
         )
 
-        st.plotly_chart(fig_pipeline, use_container_width=True)
+        st.dataframe(pd.DataFrame([
+            {'Model': 'LSTM', 'Training cost': 'High',
+             'Input needed': '30 cycles of history',
+             'Interpretability': 'Low, no direct feature attribution'},
+            {'Model': 'Gradient Boosting', 'Training cost': 'Low',
+             'Input needed': 'One cycle',
+             'Interpretability': 'High, feature importance and SHAP'},
+            {'Model': 'Random Forest', 'Training cost': 'Low',
+             'Input needed': 'One cycle',
+             'Interpretability': 'High, feature importance and SHAP'},
+            {'Model': 'Ridge / Lasso', 'Training cost': 'Very low',
+             'Input needed': 'One cycle',
+             'Interpretability': 'High, signed coefficients'},
+            {'Model': 'Weibull AFT / Cox', 'Training cost': 'Very low',
+             'Input needed': '100 cycles to the landmark',
+             'Interpretability': 'High, and gives a probability not a point'},
+        ]), use_container_width=True, hide_index=True)
 
-        # Detailed steps
         st.markdown("---")
-        st.subheader("Detailed Pipeline Steps")
+        st.subheader("How to Read These Numbers")
 
-        for i, step in enumerate(pipeline_steps, 1):
-            with st.expander(f"{step['Step']}: {step['Task']}", expanded=(i == 1)):
-                st.markdown(f"**Output:** {step['Output']}")
-                st.markdown(f"**Details:** {step['Details']}")
+        best_key = best_model_key(metrics)
+        best = metrics['models'][best_key]['test']
+        st.markdown(f"""
+        **{display_name(best_key)} leads on held out R2 at {best['r2']:.3f}**, with
+        {best['mae']:.1f} cycles of mean absolute error. The margin over gradient
+        boosting is small, and gradient boosting trains in seconds, needs a single
+        cycle rather than thirty, and can explain any individual prediction. That
+        is a real trade rather than an obvious win.
 
-                if i == 1:
-                    st.markdown("""
-                    **Dataset Information:**
-                    - Source: NASA Commercial Modular Aero-Propulsion System Simulation
-                    - Subset: FD001 (single failure mode, single operating condition)
-                    - Engines: 100 train engines, 100 test engines
-                    - Sensors: 21 sensors (14 used after cleaning)
-                    - Records: 20,631 training records
-                    """)
-                elif i == 3:
-                    st.markdown("""
-                    **Feature Engineering Techniques:**
-                    - Rolling mean (window=10): Smooth noise
-                    - Rolling standard deviation: Capture variability
-                    - Lag features (1-5 cycles): Capture temporal dependencies
-                    - EWMA (exponential smoothing): Recent trend emphasis
-                    - Sensor differences: Detect sudden changes
-                    """)
-                elif i == 4:
-                    st.markdown("""
-                    **Model Architecture:**
-                    - Linear: Ridge Regression (L2 regularization)
-                    - Ensemble: Random Forest, Gradient Boosting
-                    - Survival: Weibull AFT, Cox Proportional Hazards
-                    - Deep Learning: LSTM (32 units, dropout=0.3)
-                    """)
-                elif i == 6:
-                    st.markdown("""
-                    **Dashboard Features:**
-                    - Real-time RUL predictions
-                    - Ensemble model combining 3 models
-                    - 95% prediction intervals
-                    - SHAP explainability
-                    - Risk classification and maintenance recommendations
-                    """)
+        **The test column is the one to quote.** Validation chose the
+        hyperparameters and the preferred model, so it is optimistic by
+        construction. Both are shown so the size of that effect is visible.
 
-        # Model architecture diagram
-        st.markdown("---")
-        st.subheader("Model Architecture")
+        **{metrics['split']['test']} engines is a small sample.** The gaps between
+        the top three models are comparable to the uncertainty in the estimates
+        themselves. Cross validation over engine folds would be the honest next
+        step, and it is listed as future work rather than claimed as done.
+        """)
 
-        col1, col2 = st.columns([2, 1])
+    elif page == "Workflow":
+        st.header("How This Was Built")
 
-        with col1:
-            st.markdown("""
-            **Model Types Used:**
+        st.markdown(
+            "This page documents the pipeline behind the numbers, including the "
+            "parts that were wrong the first time. The ordering decisions matter "
+            "more than the model choices, and most of them are only visible here."
+        )
 
-            1. **Linear Models (Baseline)**
-               - Ridge Regression with L2 regularization
-               - Simple, interpretable, fast
+        st.subheader("Pipeline")
 
-            2. **Tree-Based Ensembles**
-               - Random Forest: 150 trees, max_depth=12
-               - Gradient Boosting: 150 estimators, learning_rate=0.05
-               - Capture non-linear relationships
-
-            3. **Survival Models**
-               - Weibull AFT: Best concordance (0.85)
-               - Cox Proportional Hazards: Risk ranking
-               - Probabilistic failure estimates
-
-            4. **Deep Learning**
-               - LSTM: 32 units, 30-timestep sequences
-               - Captures temporal patterns
-               - Best R² (0.8198)
-
-            5. **Ensemble Model**
-               - Weighted average: LSTM (45%), GB (35%), RF (20%)
-               - Combines strengths of all models
-               - Robust predictions
-            """)
-
-        with col2:
-            st.markdown("""
-            **Why This Approach?**
-
-            ✅ **Diversity**: Multiple model types reduce bias
-
-            ✅ **Robustness**: Ensemble handles edge cases better
-
-            ✅ **Interpretability**: SHAP explains predictions
-
-            ✅ **Uncertainty**: Confidence intervals quantify risk
-
-            ✅ **Performance**: Best R²: 0.8198
-            """)
-
-        # Industry benchmarks
-        st.markdown("---")
-        st.subheader("Industry Benchmarks")
+        st.code("""
+raw CMAPSS files  (data/bronze, tracked in git, never written to)
+        |
+        v
+  clean sensors   drop 4 constant, 3 low variance, 1 redundant
+        |         -> data/silver
+        v
+  SPLIT BY ENGINE            <-- before anything is fitted
+        |                        -> splits.json
+        +-- train (70) -> FeaturePipeline.fit()
+        |                  correlation filter + scaler learned here only
+        |                  -> feature_pipeline.joblib
+        |
+        +-- val (15)   -> tune hyperparameters
+        |
+        +-- test (15)  -> scored once, at the end
+                           -> metrics.json
+        """, language=None)
 
         st.markdown("""
-        **CMAPSS Dataset Performance Comparison**
+        Two things in that diagram are the whole point.
 
-        The NASA CMAPSS dataset is a standard benchmark for RUL prediction.
-        Our results compare favorably with published research:
+        **The split is by engine, not by row.** Rows here are cycles. Two rows
+        from one engine share rolling windows, lag features and a single
+        degradation trajectory, so a random row split puts near duplicates on
+        both sides and measures nothing useful.
+
+        **The split happens before anything is fitted.** Rolling windows and lags
+        are computed inside one engine's history, so they are safe to build
+        early. The correlation filter and the scaler are *learned from data*, so
+        they see training engines only. Getting this backwards is invisible in
+        the code and shows up only as a score that is quietly too good.
         """)
 
-        benchmark_data = [
-            {'Model': 'Our LSTM', 'R²': 0.8198, 'MAE': 13.55, 'Year': '2024'},
-            {'Model': 'Our Ensemble', 'R²': 0.82, 'MAE': 13.2, 'Year': '2024'},
-            {'Model': 'LSTM-BiLSTM (Zhao et al.)', 'R²': 0.76, 'MAE': 15.3, 'Year': '2018'},
-            {'Model': 'CNN-LSTM (Li et al.)', 'R²': 0.72, 'MAE': 17.1, 'Year': '2019'},
-            {'Model': 'Attention LSTM (Zhang et al.)', 'R²': 0.78, 'MAE': 14.8, 'Year': '2020'}
-        ]
+        st.markdown("---")
+        st.subheader("Stages")
 
-        benchmark_df = pd.DataFrame(benchmark_data)
-        benchmark_df = benchmark_df.sort_values('R²', ascending=False)
+        stages = pd.DataFrame([
+            {'Stage': '1. Ingestion',
+             'What happens': 'Read raw files, attach RUL from the engine last cycle or the truth file',
+             'Artifact': 'data/bronze'},
+            {'Stage': '2. Cleaning',
+             'What happens': 'Drop constant, low variance and redundant sensors',
+             'Artifact': 'data/silver'},
+            {'Stage': '3. Split',
+             'What happens': 'Partition engines 70/15/15, written down so nothing recomputes it',
+             'Artifact': 'splits.json'},
+            {'Stage': '4. Features',
+             'What happens': 'Rolling, lag, trend and EWMA per engine, then a train-only correlation filter and scaler',
+             'Artifact': 'feature_pipeline.joblib'},
+            {'Stage': '5. Baselines',
+             'What happens': 'Linear, Ridge, Lasso, so complex models have something to beat',
+             'Artifact': '*.pkl'},
+            {'Stage': '6. Models',
+             'What happens': 'Random Forest, Gradient Boosting, LSTM on the same split',
+             'Artifact': '*.pkl, *.keras'},
+            {'Stage': '7. Survival',
+             'What happens': 'Weibull AFT and Cox on a landmark design with censoring',
+             'Artifact': 'waft.pkl, cph.pkl'},
+            {'Stage': '8. Evaluation',
+             'What happens': 'Test scored once, with residual quantiles kept for intervals',
+             'Artifact': 'metrics.json'},
+        ])
+        st.dataframe(stages, use_container_width=True, hide_index=True)
 
-        fig_benchmark = px.bar(
-            benchmark_df,
-            x='Model',
-            y='R²',
-            color='Year',
-            title='R² Score Comparison with Published Research',
-            text='R²',
-            color_discrete_sequence=['#1f77b4'] + ['#6c757d'] * (len(benchmark_df) - 1)
-        )
+        st.markdown("---")
+        st.subheader("What Went Wrong the First Time")
 
-        fig_benchmark.update_traces(texttemplate='%{text:.3f}', textposition='outside')
-        fig_benchmark.update_layout(yaxis=dict(range=[0, 0.85]), showlegend=True)
+        st.markdown("""
+        Listing these is more useful than a list of achievements, because every
+        one of them produced a number that looked fine.
 
-        st.plotly_chart(fig_benchmark, use_container_width=True)
+        | Problem | Effect |
+        |---|---|
+        | Scaler and correlation filter fit before the split | Held out engines leaked into every feature |
+        | Test set built and never scored | Reported R2 was a validation score that had also picked the model |
+        | Two notebooks split engines differently | LSTM trained on engines the tree models were tested on |
+        | LSTM scaler never saved | Served the network inputs on a scale it was never trained on |
+        | Survival covariates taken from the failure point | Model read the answer; concordance was also in-sample |
+        | Prediction intervals from `np.random.normal` | A fabricated band labelled "95% confidence" |
+        | Metrics hardcoded in four places | They disagreed with each other and with the README |
 
-        st.caption("""
-        **Note**: Our models outperform many published approaches on the CMAPSS FD001 subset.
-        Comparisons use standard evaluation metrics (R², MAE) on the same test set.
+        All of these are fixed, and the fixes are pinned by tests. The leakage
+        one is worth spelling out: the test mutates the held out engines by a
+        factor of 1000 and asserts that nothing the pipeline learned moves.
         """)
 
-        # Key achievements
         st.markdown("---")
-        st.subheader("Key Achievements")
+        st.subheader("Reproducing This")
 
-        achievement_col1, achievement_col2, achievement_col3 = st.columns(3)
+        st.code("pip install -r requirements.txt\n"
+                "python -m src.train\n"
+                "streamlit run webapp/dashboard.py", language='bash')
 
-        with achievement_col1:
-            st.markdown("""
-            <div class="metric-card">
-            <h3>🎯 Accuracy</h3>
-            <ul>
-            <li>R²: 0.8198 (LSTM)</li>
-            <li>MAE: 13.55 cycles</li>
-            <li>Concordance: 0.85 (Weibull)</li>
-            </ul>
-            </div>
-            """, unsafe_allow_html=True)
+        if metrics:
+            st.caption(
+                f"The current artifacts were generated {metrics['generated']} "
+                f"in {metrics.get('training_seconds', 0):.0f} seconds, "
+                f"seed {metrics['seed']}."
+            )
 
-        with achievement_col2:
-            st.markdown("""
-            <div class="metric-card">
-            <h3>🔬 Innovation</h3>
-            <ul>
-            <li>Ensemble with optimal weights</li>
-            <li>95% prediction intervals</li>
-            <li>SHAP explainability</li>
-            </ul>
-            </div>
-            """, unsafe_allow_html=True)
+        st.markdown("""
+        Tree models reproduce exactly from the seed. TensorFlow on CPU does not,
+        so the LSTM moves by around a point of R2 between environments. Stated
+        rather than hidden.
 
-        with achievement_col3:
-            st.markdown("""
-            <div class="metric-card">
-            <h3>🚀 Production</h3>
-            <ul>
-            <li>Interactive dashboard</li>
-            <li>Real-time predictions</li>
-            <li>Actionable insights</li>
-            </ul>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # Technical specifications
-        st.markdown("---")
-        st.subheader("Technical Specifications")
-
-        tech_col1, tech_col2 = st.columns(2)
-
-        with tech_col1:
-            st.markdown("""
-            **Data Specifications:**
-            - Dataset: CMAPSS FD001
-            - Training: 100 engines
-            - Test: 100 engines
-            - Features: 14 sensors
-            - Max RUL: 125 cycles (clipped)
-            - Sequence length: 30 (LSTM)
-            """)
-
-        with tech_col2:
-            st.markdown("""
-            **Model Specifications:**
-            - LSTM: 32 units, dropout=0.3
-            - Random Forest: 150 trees
-            - Gradient Boosting: 150 estimators
-            - Weibull AFT: Accelerated Failure Time
-            - Cox PH: Proportional Hazards
-            - Ensemble: Weighted average
-            """)
+        **On benchmarks.** An earlier version of this page compared these results
+        against published CMAPSS papers and claimed the comparison used "the same
+        test set". It did not: this project holds out 15 engines from the training
+        file, while the literature reports on the official FD001 test split, and
+        usually as RMSE and the NASA score rather than R2. Those numbers also had
+        no citations attached. The chart has been removed rather than patched,
+        because a comparison that cannot be sourced is worse than no comparison.
+        Evaluating on the official test split is listed as future work in the
+        README.
+        """)
 
         st.markdown("---")
-        st.info("""
-        **This is a self-educational portfolio project demonstrating end-to-end
-        predictive maintenance capabilities using advanced machine learning techniques.
-
-        For questions or feedback, please refer to the project repository."""
+        st.info(
+            "Self-educational portfolio project. The pipeline, the tests and "
+            "the list of things that were wrong the first time are in the "
+            "repository README."
         )
 
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-    <p>Turbofan Engine Predictive Maintenance System v1.0</p>
+    <p>Turbofan Engine Predictive Maintenance, CMAPSS FD001</p>
     </div>
     """, unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()

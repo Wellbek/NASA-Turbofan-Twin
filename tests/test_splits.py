@@ -4,8 +4,6 @@ The split is the thing that decides whether any reported number means anything,
 and it silently disagreed between two notebooks for months. So it gets pinned.
 """
 
-import json
-
 import pytest
 
 from splits import load_splits, make_splits, save_splits, split_frame
