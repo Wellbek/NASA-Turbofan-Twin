@@ -98,43 +98,47 @@ class CMAPSSPreprocessor:
         Rolling Std: Captures increasing instsability
         Rolling Min/Max: Tracks extreme values that might indicate stress"""
         print(f"Generating rolling features for windows: {windows}")
-        
+
+        new_cols = {}
         for window in windows:
             for sensor in self.sensor_cols:
                 # Group by unit to avoid mixing different engines
                 grouped = df.groupby(unit_col)[sensor]
-                
+
                 # Rolling statistics
-                df[f'{sensor}_rolling_mean_{window}'] = grouped.transform(
+                new_cols[f'{sensor}_rolling_mean_{window}'] = grouped.transform(
                     lambda x: x.rolling(window=window, min_periods=1).mean()
                 )
-                df[f'{sensor}_rolling_std_{window}'] = grouped.transform(
+                new_cols[f'{sensor}_rolling_std_{window}'] = grouped.transform(
                     lambda x: x.rolling(window=window, min_periods=1).std()
-                ).fillna(0) # Fill NaN std with 0 (no variation for single point)
-                df[f'{sensor}_rolling_min_{window}'] = grouped.transform(
+                ).fillna(0)  # Fill NaN std with 0 (no variation for single point)
+                new_cols[f'{sensor}_rolling_min_{window}'] = grouped.transform(
                     lambda x: x.rolling(window=window, min_periods=1).min()
                 )
-                df[f'{sensor}_rolling_max_{window}'] = grouped.transform(
+                new_cols[f'{sensor}_rolling_max_{window}'] = grouped.transform(
                     lambda x: x.rolling(window=window, min_periods=1).max()
                 )
-                
+
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
         print(f"Added {len(windows) * len(self.sensor_cols) * 4} rolling features")
         return df
 
     def add_lag_features(self, df, lags=[1, 3, 5], unit_col='engine_id'):
         """Add lagged sensor values to relatively capture decline."""
         print(f"Generating lag features for lags: {lags}")
-        
+
+        new_cols = {}
         for lag in lags:
             for sensor in self.sensor_cols:
-                df[f'{sensor}_lag_{lag}'] = df.groupby(unit_col)[sensor].shift(lag)
-        
+                new_cols[f'{sensor}_lag_{lag}'] = df.groupby(unit_col)[sensor].shift(lag)
+
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
         # Fill NaN values in lag features with forward fill (for early cycles)
         # Use forward fill THEN backward fill to handle first cycles
-        lag_cols = [c for c in df.columns if '_lag_' in c]
-        for col in lag_cols:
-            df[col] = df.groupby(unit_col)[col].fillna(method='ffill').fillna(method='bfill')
-        
+        for col in new_cols:
+            df[col] = df.groupby(unit_col)[col].ffill().bfill()
+
         print(f"Added {len(lags) * len(self.sensor_cols)} lag features")
         return df
 
@@ -147,30 +151,32 @@ class CMAPSSPreprocessor:
         """
         print(f"Generating trend features with window={window}")
         
+        # Rolling slope (linear regression coefficient)
+        def rolling_slope(series):
+            if len(series) < 2:
+                return 0
+            x = np.arange(len(series))
+            y = series.values
+            # Handle constant series
+            if np.std(y) == 0:
+                return 0
+            slope = np.polyfit(x, y, 1)[0]
+            return slope
+
+        new_cols = {}
         for sensor in self.sensor_cols:
             # Rate of change (first difference)
-            df[f'{sensor}_diff'] = df.groupby(unit_col)[sensor].diff()
-            
-            # Rolling slope (linear regression coefficient)
-            def rolling_slope(series):
-                if len(series) < 2:
-                    return 0
-                x = np.arange(len(series))
-                y = series.values
-                # Handle constant series
-                if np.std(y) == 0:
-                    return 0
-                slope = np.polyfit(x, y, 1)[0]
-                return slope
-            
-            df[f'{sensor}_slope_{window}'] = df.groupby(unit_col)[sensor].transform(
+            new_cols[f'{sensor}_diff'] = df.groupby(unit_col)[sensor].diff()
+
+            new_cols[f'{sensor}_slope_{window}'] = df.groupby(unit_col)[sensor].transform(
                 lambda x: x.rolling(window=window, min_periods=2).apply(rolling_slope, raw=False)
             )
-        
-        # Fill NaN values
-        trend_cols = [c for c in df.columns if '_diff' in c or '_slope_' in c]
-        df[trend_cols] = df.groupby(unit_col)[trend_cols].fillna(0)
-        
+
+        # Fill NaN values. Filling with a constant needs no grouping: the NaNs
+        # here are the leading cycles of each engine, where no previous value exists.
+        trend = pd.DataFrame(new_cols, index=df.index).fillna(0)
+        df = pd.concat([df, trend], axis=1)
+
         print(f"Added {len(self.sensor_cols) * 2} trend features")
         return df
 
@@ -185,13 +191,15 @@ class CMAPSSPreprocessor:
         EWMA:       82  # Recent spike weighted heavily
         """
         print(f"Generating EWMA features for spans: {spans}")
-        
+
+        new_cols = {}
         for span in spans:
             for sensor in self.sensor_cols:
-                df[f'{sensor}_ewma_{span}'] = df.groupby(unit_col)[sensor].transform(
+                new_cols[f'{sensor}_ewma_{span}'] = df.groupby(unit_col)[sensor].transform(
                     lambda x: x.ewm(span=span, adjust=False).mean()
                 )
-        
+
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
         print(f"Added {len(spans) * len(self.sensor_cols)} EWMA features")
         return df
 

@@ -62,16 +62,32 @@ class CMAPSSLoader:
         return df
 
     def _calculate_test_rul(self, df, dataset_name):
-        """Calculate RUL for test split using truth file"""
-        rul_truth = pd.read_csv(self.data_dir / f'RUL_{dataset_name}.txt', header=None)
-        rul_truth.columns = ['truth_rul']
+        """Calculate RUL for test split using truth file.
 
-        max_cycles = df.groupby('engine_id')['time_cycles'].max().reset_index()
-        max_cycles['truth_rul'] = rul_truth['truth_rul']
-        
-        df = df.merge(max_cycles, on='engine_id', how='left')
-        df['RUL'] = df['truth_rul'] + (df['time_cycles'].max() - df['time_cycles'])
-        return df.drop('truth_rul', axis=1)
+        Test engines are truncated some time before failure. The truth file
+        gives the RUL remaining at each engine's *last* recorded cycle, so the
+        RUL at any earlier cycle is that value plus the cycles still to come
+        for that same engine.
+        """
+        rul_truth = pd.read_csv(self.data_dir / f'RUL_{dataset_name}.txt',
+                                sep=r'\s+', header=None, usecols=[0],
+                                names=['truth_rul'])
+
+        last_cycle = (df.groupby('engine_id')['time_cycles'].max()
+                        .rename('last_cycle').reset_index())
+
+        if len(rul_truth) != len(last_cycle):
+            raise ValueError(
+                f'RUL truth file has {len(rul_truth)} rows but {dataset_name} '
+                f'test split has {len(last_cycle)} engines')
+
+        # The truth file is ordered by engine_id, one row per engine.
+        last_cycle = last_cycle.sort_values('engine_id').reset_index(drop=True)
+        last_cycle['truth_rul'] = rul_truth['truth_rul'].values
+
+        df = df.merge(last_cycle, on='engine_id', how='left')
+        df['RUL'] = df['truth_rul'] + (df['last_cycle'] - df['time_cycles'])
+        return df.drop(columns=['truth_rul', 'last_cycle'])
 
 
 
