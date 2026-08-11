@@ -16,7 +16,8 @@ Order matters here and is the point of the whole file:
 4. fit the scaler and the correlation filter on TRAIN ROWS ONLY
 5. tune on validation
 6. score once on test, at the end
-7. write one metrics.json that every other surface reads
+7. fit the survival models on a landmark design, scored on held out engines
+8. write one metrics.json that every other surface reads
 """
 
 from __future__ import annotations
@@ -105,7 +106,7 @@ def residual_quantiles(y_true, y_pred) -> dict:
 # --------------------------------------------------------------------------
 
 def load_and_clean() -> pd.DataFrame:
-    print('[1/7] loading and cleaning raw data')
+    print('[1/8] loading and cleaning raw data')
     loader = CMAPSSLoader(BRONZE_DIR)
     raw = loader.load_dataset(DATASET, split='train')
 
@@ -123,19 +124,19 @@ def load_and_clean() -> pd.DataFrame:
 
 def build_matrices(cleaned: pd.DataFrame):
     """Split first, then fit the pipeline on training rows only."""
-    print('[2/7] splitting by engine')
+    print('[2/8] splitting by engine')
     splits = make_splits(cleaned['engine_id'].unique(), seed=SEED)
     save_splits(splits)
     print(f'      train={len(splits["train"])} val={len(splits["val"])} '
           f'test={len(splits["test"])} engines')
 
-    print('[3/7] engineering features')
+    print('[3/8] engineering features')
     pipe = FeaturePipeline()
     targeted = pipe.add_target(cleaned)
     featured = pipe.build_features(targeted)
     train_f, val_f, test_f = split_frame(featured, splits)
 
-    print('[4/7] fitting scaler and correlation filter on training engines only')
+    print('[4/8] fitting scaler and correlation filter on training engines only')
     pipe.fit(train_f, already_featured=True)
     print(f'      kept {len(pipe.feature_names_)} features, '
           f'dropped {len(pipe.dropped_correlated_)} correlated')
@@ -157,7 +158,7 @@ def build_matrices(cleaned: pd.DataFrame):
 
 
 def train_sklearn_models(train, val, test):
-    print('[5/7] training scikit-learn models')
+    print('[5/8] training scikit-learn models')
     (X_train, y_train), (X_val, y_val), (X_test, y_test) = train, val, test
     models, metrics = {}, {}
 
@@ -237,7 +238,7 @@ def make_sequences(frame: pd.DataFrame, cols: list, length: int):
 
 
 def train_lstm(pipe, splits, featured, top_features):
-    print('[6/7] training LSTM')
+    print('[6/8] training LSTM')
     import tensorflow as tf
     from sklearn.preprocessing import StandardScaler
     from tensorflow import keras
@@ -302,8 +303,43 @@ def train_lstm(pipe, splits, featured, top_features):
     return metrics
 
 
-def write_artifacts(pipe, splits, metrics, filenames, cleaned, elapsed, lstm_trained):
-    print('[7/7] writing metrics and metadata')
+def train_survival(cleaned, splits):
+    """Fit the survival models on the landmark design and score held out engines."""
+    print('[7/8] training survival models')
+    import survival
+
+    frame = survival.build_landmark_frame(cleaned)
+    train_f = frame[frame['engine_id'].isin(splits['train'])]
+    val_f = frame[frame['engine_id'].isin(splits['val'])]
+    test_f = frame[frame['engine_id'].isin(splits['test'])]
+
+    covariates = survival.select_covariates(train_f)
+    models, scaler, design = survival.fit_survival_models(train_f, covariates)
+    print(f'      landmark={survival.LANDMARK} horizon={survival.HORIZON} '
+          f'engines={len(frame)} censored={int((frame["event"] == 0).sum())}')
+
+    metrics = {}
+    for name, model in models.items():
+        metrics[name] = {
+            'validation': {'concordance': survival.concordance(model, design(val_f))},
+            'test': {'concordance': survival.concordance(model, design(test_f))},
+            'train_concordance': survival.concordance(model, design(train_f)),
+        }
+        print(f'      {name:<18} val c={metrics[name]["validation"]["concordance"]:.3f} '
+              f'test c={metrics[name]["test"]["concordance"]:.3f}')
+
+    joblib.dump(models['weibull'], MODELS_DIR / 'waft.pkl')
+    joblib.dump(models['cox'], MODELS_DIR / 'cph.pkl')
+    joblib.dump({'scaler': scaler, 'covariates': covariates,
+                 'landmark': survival.LANDMARK, 'window': survival.WINDOW,
+                 'horizon': survival.HORIZON},
+                MODELS_DIR / 'survival_design.joblib')
+    return metrics
+
+
+def write_artifacts(pipe, splits, metrics, filenames, cleaned, elapsed, lstm_trained,
+                    survival_metrics=None):
+    print('[8/8] writing metrics and metadata')
     payload = {
         'generated': date.today().isoformat(),
         'dataset': DATASET,
@@ -312,9 +348,12 @@ def write_artifacts(pipe, splits, metrics, filenames, cleaned, elapsed, lstm_tra
         'n_features': len(pipe.feature_names_),
         'training_seconds': round(elapsed, 1),
         'models': metrics,
+        'survival': survival_metrics or {},
         'notes': (
             'Validation is used for hyperparameter selection. Test is scored '
-            'once, after selection, and is what should be reported.'),
+            'once, after selection, and is what should be reported. Survival '
+            'concordance is reported on held out engines, not the training '
+            'concordance_index_ attribute.'),
     }
     with open(METRICS_FILE, 'w') as f:
         json.dump(payload, f, indent=2)
@@ -382,13 +421,16 @@ def main():
       .to_csv(GOLD_DIR / f'{DATASET}_top_features.csv', index=False)
 
     if args.skip_lstm:
-        print('[6/7] skipping LSTM')
+        print('[6/8] skipping LSTM')
     else:
         metrics['lstm'] = train_lstm(pipe, splits, featured, top_features)
 
+    survival_metrics = train_survival(cleaned, splits)
+
     elapsed = time.perf_counter() - started
     write_artifacts(pipe, splits, metrics, filenames, cleaned, elapsed,
-                    lstm_trained=not args.skip_lstm)
+                    lstm_trained=not args.skip_lstm,
+                    survival_metrics=survival_metrics)
     print(f'\ndone in {elapsed:.1f}s')
 
 

@@ -144,6 +144,38 @@ def test_test_scores_are_not_better_than_validation_by_a_lot(metrics):
         assert gap < 0.10, f'{name} scores {gap:.3f} higher on test than validation'
 
 
+def test_survival_metrics_are_out_of_sample(metrics):
+    """Survival scores must be reported on held out engines.
+
+    The old metadata carried concordance 0.85, which was the training
+    concordance on covariates built from the failure point itself.
+    """
+    survival = metrics.get('survival')
+    if not survival:
+        pytest.skip('survival models not trained')
+
+    for name, m in survival.items():
+        assert 'test' in m, f'{name} has no held out score'
+        c = m['test']['concordance']
+        assert 0.0 <= c <= 1.0
+        # Training concordance is kept for reference, but must be distinct
+        # from what gets reported.
+        assert c != pytest.approx(m['train_concordance'], abs=1e-9)
+
+
+def test_survival_design_artifact_is_saved():
+    """The standardiser and covariate list are part of the survival artifact."""
+    design_file = MODELS_DIR / 'survival_design.joblib'
+    if not design_file.exists():
+        pytest.skip('survival models not trained')
+
+    import joblib
+    design = joblib.load(design_file)
+    for key in ('scaler', 'covariates', 'landmark', 'window', 'horizon'):
+        assert key in design, f'{key} missing from survival design artifact'
+    assert len(design['covariates']) > 0
+
+
 def test_metadata_and_metrics_agree(metrics):
     """One source of truth. These used to be maintained separately and drift."""
     with open(MODELS_DIR / 'model_metadata.json') as f:
