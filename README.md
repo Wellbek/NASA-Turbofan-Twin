@@ -1,14 +1,11 @@
 # NASA Turbofan Twin: Predictive Maintenance for Jet Engines
 
-Predicting how many flight cycles a turbofan engine has left, from raw sensor data through to a dashboard you can click around in.
+Predicting how many flight cycles a turbofan engine has left, from raw sensor data through to an interactive dashboard.
 
-The data is NASA's CMAPSS FD001 benchmark: 100 simulated engines, 21 sensor channels each, every one of them run until it fails.
+The data is NASA's CMAPSS FD001 benchmark: 100 simulated engines, 21 sensor channels each, every one of them run until they fail.
 
-I started this to work through a full data science lifecycle end to end rather than to chase a leaderboard number, and the models I ended up with are the ordinary ones.
-What actually took the time, and what most of this README is about, was everything around them: where the split goes, what gets fitted on what, and which artifacts have to travel together so that the thing serving predictions behaves like the thing I trained.
+This project served the purpose to work through a clean data science lifecycle end to end within 8 weeks for self-educational purposes.
 Below I am documenting that process, including the parts I got wrong the first time, because those turned out to be the more useful half of the exercise.
-
-**This project is for self-educational purposes.**
 
 ---
 
@@ -28,7 +25,7 @@ streamlit run webapp/dashboard.py
 
 That one training command rebuilds everything: cleaned data, features, all six models, the survival models, and the metrics file the rest of the project reads from.
 It writes into `data/models/cmapss/`, which I keep gitignored, since trained models are build output rather than something worth versioning.
-If you are in a hurry, `--skip-lstm` drops the slow stage.
+Do `--skip-lstm` to drop the slow stage.
 
 To run the tests:
 
@@ -64,11 +61,11 @@ Two caveats I would rather state myself than have someone find.
 
 Validation comes out higher than test for every single model, and it should.
 Validation is what picked my alphas and what I used to decide which model I preferred, so by the time I read it, it has already been optimised against.
-The gap between those two columns is roughly what that selection cost me, which is why I print both instead of just the friendlier one.
+The gap between those two columns is roughly what that selection costs, which is why I print both instead of just the better one.
 
 The test set is also only 15 engines.
 The distance between my top three models is not much bigger than the noise I would expect from a sample that size, so the LSTM winning is suggestive rather than settled.
-Cross validation over engine folds would answer it properly and I have not done that yet.
+Cross validation over engine folds would probably answer it properly and I have not done that yet.
 
 ---
 
@@ -87,7 +84,7 @@ data/models/    trained models, fitted transformers, split, metrics
 ```
 
 Only bronze is committed.
-Everything under it comes back from the training script, which is a decent way of finding out whether the pipeline still runs.
+Everything under it comes back from the training script.
 
 ### Module map
 
@@ -104,7 +101,7 @@ Everything under it comes back from the training script, which is a decent way o
 
 ### Keeping training and serving in step
 
-This is the idea I would most want to talk through in an interview, mainly because I had to learn it by making the same mistake in three different places.
+This is something I had to learn it by making the same mistake in three different places.
 
 A saved model on its own is not enough to predict with.
 You also need everything fitted alongside it: which features survived selection, the min and max used to scale them, the standardiser the LSTM expects, the order the columns arrive in.
@@ -128,25 +125,7 @@ and serving loads exactly those.
 I did the same thing for numbers with `metrics.json`.
 The dashboard, the notebooks and the results table above all read from it rather than keeping private copies, which is what they used to do, and those copies had already drifted out of agreement with each other.
 
-```
-raw cycles
-    |
-    v
-CMAPSSPreprocessor        clean sensors
-    |
-    v
-make_splits               <-- split happens HERE, before anything is fitted
-    |
-    +---> train engines --> FeaturePipeline.fit()  --> feature_pipeline.joblib
-    |                              |
-    |                              v
-    +---> val / test -------> .transform() ---------> model training
-                                                          |
-                                                          v
-                                          models + metrics.json + scalers
-                                                          |
-                                     dashboard / notebooks read these
-```
+![Pipeline](docs/pipeline.png)
 
 ---
 
@@ -158,10 +137,10 @@ A fair number of these got rebuilt after I went back through the repo properly a
 ### Framing the problem
 
 RUL prediction is regression, but the cost of being wrong is lopsided.
-If I tell a maintenance team an engine has more life left than it does, they can end up with an aircraft stranded somewhere; if I tell them it has less, they replace a serviceable engine early and waste money.
+If I tell a maintenance team an engine has more life left than it does, they can end up with an aircraft crashing somewhere; if I tell them it has less, they replace a serviceable engine early and waste money.
 MAE and R2 score those two mistakes identically, so I report the CMAPSS NASA score next to them, which punishes the optimistic direction on a steeper curve.
 
-I also clip RUL at 125 cycles.
+I also clip RUL at 125 cycles after inspecting historic RUL graphs.
 An engine with 200 cycles left and one with 190 are both just healthy, and nobody schedules anything differently between them, so making the model learn that distinction spends capacity on something no one acts on.
 
 ### Loading the data
@@ -178,7 +157,7 @@ I fixed both, and now check the result against `RUL_FD001.txt` directly rather t
 I looked at sensor distributions, correlation structure, degradation traces for individual engines, and how each sensor drifts across normalised engine life.
 
 The useful output of this stage was not the plots, it was the list of sensors to throw away.
-Four are completely constant, three barely move, and one is over 0.95 correlated with another, so eight columns were gone before I started modelling.
+Four are completely constant, three barely move, and one is over 0.95 correlated with another, so eight columns were removed before I started modelling.
 
 ### Cleaning
 
@@ -187,7 +166,7 @@ I kept cleaning separate from feature engineering so that changing a cleaning ru
 
 ### Splitting, before anything gets fitted
 
-If there is one decision in this repo I would defend hardest, it is this one, and it is also the one I originally had backwards.
+I originally had this wrongfully backwards.
 
 The rows are cycles, not independent observations.
 Two rows from the same engine share rolling windows, lag features and one continuous degradation curve, so splitting rows at random scatters near-duplicates across both sides and gives me a score that says nothing about how the model handles an engine it has never seen.
@@ -198,7 +177,7 @@ In the first version I normalised and correlation-filtered the entire dataset an
 Once I moved the split ahead of the fitting, the scores came down, which is exactly what should happen.
 
 I also started writing the split to `splits.json` so everything reads it from one place.
-That was not bureaucracy for its own sake: I found that my two modelling notebooks each computed what a comment claimed was the same split, one shuffling the engine IDs and one sorting them.
+I found that my two modelling notebooks each computed what I claimed the same split, one shuffling the engine IDs and one sorting them.
 Engines held out from the tree models were sitting inside the LSTM's training set, so every comparison I had made between the two was measured on different data.
 
 ### Feature engineering
@@ -208,7 +187,7 @@ All of them are computed inside a single engine's own history, which is what mak
 
 My reasoning was that one sensor reading tells you where an engine currently sits, but degradation is about where it is heading, and that only shows up across a window.
 
-The correlation filter then drops 121 of the 276 candidates, since features built this way overlap heavily by construction.
+The correlation filter then drops 121 of the 276 candidates, since features built this way correlate heavily by construction.
 
 ### Baselines first
 
@@ -228,15 +207,15 @@ The number I had been quoting everywhere was a validation score that had also ch
 
 ### Survival analysis, asked properly
 
-Weibull AFT and Cox proportional hazards, on a landmark design: watch each engine to cycle 100, build the covariates only from that window, then model the time remaining after it, right censored at a horizon.
+Weibull AFT and Cox proportional hazards: watch each engine to cycle 100, build the covariates only from that window, then model the time remaining after it, right censored at a horizon.
 
 The version before this built its covariates from the last 30 cycles before failure and predicted total lifetime, which amounts to reading the end of the story to work out how long the story was.
 It also reported `concordance_index_`, which is the training concordance, as though it were a generalisation result.
 Fixing both dropped the reported figure from 0.85 to 0.611, and that drop is the honest outcome rather than a regression.
 
 Censoring mattered here too.
-With every engine running to failure my event column was a constant 1, and survival analysis with nothing censored is really just regression carrying a lot of extra machinery around.
-Cutting observation off at a horizon gave that column something to say.
+With every engine running to failure my event column was a constant 1, and survival analysis with nothing censored is really just regression.
+Cutting observation off at a horizon gave that column some meaning.
 
 ### Interpretability
 
@@ -248,7 +227,7 @@ A maintenance recommendation that cannot point at a sensor is not one anybody is
 Prediction intervals now come from each model's own residual quantiles on the held out engines, which the training run records for exactly this purpose.
 
 They used to come out of `np.random.normal`, scaled off the prediction itself, with the same percentile used for both bounds, and the UI labelled the result "95% confidence".
-That one bothered me more than anything else I found, because an interval that is invented is worse than no interval at all: people will plan around it.
+That one bothered me more than anything else I found, because an interval that is invented is worse than no interval at all (costly in practice/industry as the invented interval might be part of any planning process).
 
 ### Serving
 
@@ -261,13 +240,13 @@ Every number on screen is read from `metrics.json` rather than stored in the app
 I added upper bounds to the dependencies after a pandas 3 upgrade silently broke two feature builders that nothing outside a notebook imported.
 
 The tree models come back identical from the seed.
-TensorFlow on CPU does not, so the LSTM moves by roughly a point of R2 between environments, which I would rather write down than pretend away.
+TensorFlow on CPU does not, so the LSTM moves by roughly a point of R2 between environments, which I would rather write down than ignore.
 
 ### Tests and CI
 
-A pytest suite over the data and feature layer, running on every push.
+A pytest suite over the data and feature layer (running on every push on github actions as well).
 
-I aimed it squarely at the failures this project actually had: the RUL definitions for both splits, engine boundaries in the lag and window features, whether the split is disjoint and deterministic, and a leakage test that mutates the held out engines and checks that nothing the pipeline learned moves.
+The RUL definitions for both splits, engine boundaries in the lag and window features, whether the split is disjoint and deterministic, and a leakage test that mutates the held out engines and checks that nothing the pipeline learned moves.
 Warnings fail the build, since the pandas deprecation that broke everything had been printing quietly into a notebook for two releases while I ignored it.
 
 Model training stays out of CI, and the tests that check training and serving agree skip themselves when there is nothing trained to check.
@@ -278,7 +257,7 @@ Model training stays out of CI, and the tests that check training and serving ag
 
 Evaluating on the official FD001 test split, and reporting RMSE and the NASA score, would make these results comparable with published CMAPSS work. My internal split answers a slightly different question.
 
-Cross validation over engine folds is the obvious gap. Fifteen test engines is not enough for me to separate the top three models with any confidence.
+Cross validation over engine folds is the obvious gap. Fifteen test engines is not enough to separate the top three models with any confidence.
 
 FD002 and FD004 introduce multiple operating conditions, which would need condition-aware normalisation rather than the single global scaler I use here.
 
