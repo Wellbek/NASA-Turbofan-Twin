@@ -1,25 +1,24 @@
 # --- Data ---
-# Ignore all processed data
+# Raw data in data/bronze is tracked. Everything derived from it is not:
+# regenerate the silver and gold layers with `python -m src.train`.
 data/silver/*
-!data/silver/.gitkeep   # keep the empty folder in Git
+!data/silver/.gitkeep
 data/gold/*
-!data/gold/.gitkeep   # keep the empty folder in Git
+!data/gold/.gitkeep
 
-# Keep raw data tracked
-!data/bronze/*
-
-# Ignore models
+# Trained models are build artifacts, not source.
 data/models/*
-!data/models/.gitkeep   # keep the empty folder in Git
+!data/models/.gitkeep
 
 # --- Python ---
-src/__pycache__/
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
 
 # --- Jupyter ---
 .ipynb_checkpoints/
+*.nbconvert.ipynb
 
 # --- Node (screenshot tooling, kept local) ---
 node_modules/
@@ -30,3 +29,6 @@ package-lock.json
 # --- System files ---
 .DS_Store
 Thumbs.db
+
+# Generated on demand by the screenshot tooling, not a project artifact.
+docs/screenshots/sample_upload.csv

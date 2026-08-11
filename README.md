@@ -1,270 +1,340 @@
-# NASA Turbofan Twin – Predictive Maintenance for Jet Engines
+# NASA Turbofan Twin: Predictive Maintenance for Jet Engines
 
-## Project Overview
+Predicting how many flight cycles a turbofan engine has left, from raw sensor data through to an interactive dashboard.
 
-This project focuses on **predictive maintenance of turbofan engines** using NASA’s **CMAPSS (Commercial Modular Aero-Propulsion System Simulation) dataset**. The goal is to predict the **Remaining Useful Life (RUL)** of engines, identify early signs of failure, and provide actionable insights for maintenance scheduling.
+The data is NASA's CMAPSS FD001 benchmark: 100 simulated engines, 21 sensor channels each, every one of them run until they fail.
 
-By simulating real-world engine degradation through time-series sensor data, this project demonstrates how advanced **statistical models, machine learning, and deep learning** can transform raw operational data into **predictive insights**, helping reduce unplanned downtime, optimize maintenance costs, and improve safety.
-
-The results are visualized via an **interactive Streamlit dashboard**, making it easier to interpret predictions, monitor engine health, and understand which sensor features drive model decisions.
-
-**This project is for self-educational purposes only.**
+This project served the purpose to work through a clean data science lifecycle end to end within 8 weeks for self-educational purposes.
+Below I am documenting that process, including the parts I got wrong the first time, because those turned out to be the more useful half of the exercise.
 
 ---
 
-## Getting Started
-
-### Prerequisites
-
-* Python 3.9 or higher
-* Git
-
-### Installation
-
-1. Clone the repository:
+## Quickstart
 
 ```bash
 git clone <repository-url>
 cd NASA-Turbofan-Twin
-```
 
-2. Create a virtual environment (recommended):
-
-```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. Install dependencies:
-
-```bash
+source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+
+python -m src.train               # raw data to trained models, about 3 minutes
+streamlit run webapp/dashboard.py
 ```
 
-### Running the Dashboard
+That one training command rebuilds everything: cleaned data, features, all six models, the survival models, and the metrics file the rest of the project reads from.
+It writes into `data/models/cmapss/`, which I keep gitignored, since trained models are build output rather than something worth versioning.
+Do `--skip-lstm` to drop the slow stage.
 
-The interactive Streamlit dashboard provides visualizations of model performance, individual engine analysis, fleet management, and detailed metrics.
+To run the tests:
 
 ```bash
-cd webapp
-streamlit run dashboard.py
+pip install -r requirements-dev.txt
+pytest
 ```
 
-The dashboard will open in your browser at `http://localhost:8501`
+---
 
-**Dashboard Pages:**
+## Results
 
-* **🏠 Overview**: System KPIs, model comparison table, and decision framework
-* **🔮 New Prediction**: Upload CSV or enter sensor readings for real-time predictions
-* **🔍 Engine Analysis**: Select an engine to see predictions from all models with SHAP explainability
-* **📊 Model Comparison**: Visual comparison of model performance metrics
-* **🎯 Fleet Management**: Risk assessment across all engines with priority scheduling
-* **📈 Performance Metrics**: Detailed metrics with model trade-off analysis
-* **📚 Workflow**: End-to-end pipeline documentation with industry benchmarks
+Everything below is measured on the 15 test engines I kept out of both training and model selection.
+The numbers come from `data/models/cmapss/metrics.json`, which the training run writes.
 
-### Running Notebooks
+| Model | Test R2 | Test MAE | Test RMSE | NASA score | Validation R2 |
+|---|---|---|---|---|---|
+| LSTM | 0.8270 | 12.82 | 17.35 | 15,301 | 0.8470 |
+| Gradient Boosting | 0.8119 | 13.42 | 18.09 | 34,466 | 0.8289 |
+| Random Forest | 0.8027 | 14.22 | 18.52 | 34,807 | 0.8256 |
+| Ridge | 0.7563 | 16.63 | 20.59 | 25,437 | 0.8099 |
+| Linear Regression | 0.7563 | 16.61 | 20.59 | 25,775 | 0.8085 |
+| Lasso | 0.7332 | 17.56 | 21.54 | 29,518 | 0.7941 |
 
-The project follows an 8-week pipeline documented in Jupyter notebooks:
+The survival models get a concordance index instead, since they rank risk rather than predict a number:
+
+| Model | Test C-index | Validation C-index | Train C-index |
+|---|---|---|---|
+| Weibull AFT | 0.611 | 0.889 | 0.707 |
+| Cox PH | 0.579 | 0.878 | 0.703 |
+
+Two caveats I would rather state myself than have someone find.
+
+Validation comes out higher than test for every single model, and it should.
+Validation is what picked my alphas and what I used to decide which model I preferred, so by the time I read it, it has already been optimised against.
+The gap between those two columns is roughly what that selection costs, which is why I print both instead of just the better one.
+
+The test set is also only 15 engines.
+The distance between my top three models is not much bigger than the noise I would expect from a sample that size, so the LSTM winning is suggestive rather than settled.
+Cross validation over engine folds would probably answer it properly and I have not done that yet.
+
+---
+
+## Architecture
+
+### Data layers
+
+I never touch the raw files.
+Everything below them is derived, and I can delete the lot and rebuild it.
+
+```
+data/bronze/    raw CMAPSS text files, tracked in git, never written to
+data/silver/    cleaned: constant, low variance and redundant sensors removed
+data/gold/      engineered and normalised feature matrix, model ready
+data/models/    trained models, fitted transformers, split, metrics
+```
+
+Only bronze is committed.
+Everything under it comes back from the training script.
+
+### Module map
+
+| File | Responsibility |
+|------|----------------|
+| `src/data_loader.py` | Read raw files, attach the RUL label for train and test splits |
+| `src/preprocessor.py` | Sensor cleaning and the stateless feature formulas |
+| `src/splits.py` | Engine level train/val/test split, written to disk as an artifact |
+| `src/pipeline.py` | `FeaturePipeline`: stateless features plus the fitted correlation filter and scaler |
+| `src/feature_engineering.py` | Serving path, loads the fitted pipeline and applies it |
+| `src/survival.py` | Landmark survival design, Weibull AFT and Cox PH |
+| `src/train.py` | The one command that runs all of it and writes metrics |
+| `webapp/dashboard.py` | Streamlit app, reads artifacts only |
+
+### Keeping training and serving in step
+
+This is something I had to learn it by making the same mistake in three different places.
+
+A saved model on its own is not enough to predict with.
+You also need everything fitted alongside it: which features survived selection, the min and max used to scale them, the standardiser the LSTM expects, the order the columns arrive in.
+When any of that only exists as a line in a notebook, the serving code has to reimplement it from memory, and the two versions drift apart silently, because nothing raises when they disagree. You just quietly get worse predictions.
+
+So I made the training run write all of it out together:
+
+```
+data/models/cmapss/
+  feature_pipeline.joblib   fitted feature set, correlation filter, scaler
+  splits.json               which engines are train, val and test
+  metrics.json              validation and test scores, plus residual quantiles
+  lstm_scaler.joblib        the standardiser the LSTM was fit with
+  lstm_features.json        its feature subset and sequence length
+  *.pkl / *.keras           the models themselves
+```
+
+and serving loads exactly those.
+`src/feature_engineering.py` has no feature formulas in it any more, it just applies the pipeline that training saved, so there is one implementation and nothing for it to disagree with.
+
+I did the same thing for numbers with `metrics.json`.
+The dashboard, the notebooks and the results table above all read from it rather than keeping private copies, which is what they used to do, and those copies had already drifted out of agreement with each other.
+
+![Pipeline](docs/pipeline.png)
+
+---
+
+## Working Through the Lifecycle
+
+What follows is each stage in the order I worked through it, what I was trying to achieve, and where I changed my mind.
+A fair number of these got rebuilt after I went back through the repo properly and realised I had the right stages in the wrong order.
+
+### Framing the problem
+
+RUL prediction is regression, but the cost of being wrong is lopsided.
+If I tell a maintenance team an engine has more life left than it does, they can end up with an aircraft crashing somewhere; if I tell them it has less, they replace a serviceable engine early and waste money.
+MAE and R2 score those two mistakes identically, so I report the CMAPSS NASA score next to them, which punishes the optimistic direction on a steeper curve.
+
+I also clip RUL at 125 cycles after inspecting historic RUL graphs.
+An engine with 200 cycles left and one with 190 are both just healthy, and nobody schedules anything differently between them, so making the model learn that distinction spends capacity on something no one acts on.
+
+### Loading the data
+
+Raw files get read once and never written back to.
+Training engines get RUL from their own last cycle; test engines get theirs from the truth file NASA ships alongside.
+
+When I came back to this I found the test loader had never actually worked.
+It crashed on a merge that collided on a column name, and underneath that its RUL formula subtracted from the fleet-wide maximum cycle rather than each engine's own, which would have inflated the label for every engine except the longest-lived one.
+I fixed both, and now check the result against `RUL_FD001.txt` directly rather than against a number I picked to make the test pass.
+
+### Exploration
+
+I looked at sensor distributions, correlation structure, degradation traces for individual engines, and how each sensor drifts across normalised engine life.
+
+The useful output of this stage was not the plots, it was the list of sensors to throw away.
+Four are completely constant, three barely move, and one is over 0.95 correlated with another, so eight columns were removed before I started modelling.
+
+### Cleaning
+
+Those get dropped and the result written to the silver layer.
+I kept cleaning separate from feature engineering so that changing a cleaning rule does not force me to rerun the expensive part.
+
+### Splitting, before anything gets fitted
+
+I originally had this wrongfully backwards.
+
+The rows are cycles, not independent observations.
+Two rows from the same engine share rolling windows, lag features and one continuous degradation curve, so splitting rows at random scatters near-duplicates across both sides and gives me a score that says nothing about how the model handles an engine it has never seen.
+That is why I split by engine.
+
+The part I got wrong was the ordering.
+In the first version I normalised and correlation-filtered the entire dataset and only split afterwards, which meant the scaler's min and max, and my choice of which features to keep, had both already looked at the held out engines.
+Once I moved the split ahead of the fitting, the scores came down, which is exactly what should happen.
+
+I also started writing the split to `splits.json` so everything reads it from one place.
+I found that my two modelling notebooks each computed what I claimed the same split, one shuffling the engine IDs and one sorting them.
+Engines held out from the tree models were sitting inside the LSTM's training set, so every comparison I had made between the two was measured on different data.
+
+### Feature engineering
+
+Rolling mean, standard deviation, min and max at 5, 10 and 20 cycle windows; lags at 1, 3 and 5; first difference and a rolling least-squares slope; EWMA at three spans.
+All of them are computed inside a single engine's own history, which is what makes it safe to build them before splitting.
+
+My reasoning was that one sensor reading tells you where an engine currently sits, but degradation is about where it is heading, and that only shows up across a window.
+
+The correlation filter then drops 121 of the 276 candidates, since features built this way correlate heavily by construction.
+
+### Baselines first
+
+Linear regression, then Ridge, then Lasso, then Random Forest, then Gradient Boosting, then the LSTM.
+
+I did not put the baselines in to compete.
+They are there so the expensive models have something concrete to beat, and so I can see what the problem gives me for free.
+As it turned out, the whole journey from linear regression to the LSTM is worth about 0.07 R2, bought with a large increase in training time and the loss of any direct way to explain a prediction.
+That felt worth knowing before reaching for a sequence model.
+
+### Tuning on validation, reporting on test
+
+Three splits doing three jobs: train fits, validation selects, test gets looked at once at the very end.
+
+My first version built a test set and then never scored anything on it, which is why `test_r2` was sitting at `null` in the metadata for every tree model.
+The number I had been quoting everywhere was a validation score that had also chosen the model, and a number cannot both make a decision and measure it.
+
+### Survival analysis, asked properly
+
+Weibull AFT and Cox proportional hazards: watch each engine to cycle 100, build the covariates only from that window, then model the time remaining after it, right censored at a horizon.
+
+The version before this built its covariates from the last 30 cycles before failure and predicted total lifetime, which amounts to reading the end of the story to work out how long the story was.
+It also reported `concordance_index_`, which is the training concordance, as though it were a generalisation result.
+Fixing both dropped the reported figure from 0.85 to 0.611, and that drop is the honest outcome rather than a regression.
+
+Censoring mattered here too.
+With every engine running to failure my event column was a constant 1, and survival analysis with nothing censored is really just regression.
+Cutting observation off at a horizon gave that column some meaning.
+
+### Interpretability
+
+Feature importance from both tree models, averaged so I am looking at what they agree on, plus SHAP for individual predictions.
+A maintenance recommendation that cannot point at a sensor is not one anybody is going to act on.
+
+### Uncertainty that is actually measured
+
+Prediction intervals now come from each model's own residual quantiles on the held out engines, which the training run records for exactly this purpose.
+
+They used to come out of `np.random.normal`, scaled off the prediction itself, with the same percentile used for both bounds, and the UI labelled the result "95% confidence".
+That one bothered me more than anything else I found, because an interval that is invented is worse than no interval at all (costly in practice/industry as the invented interval might be part of any planning process).
+
+### Serving
+
+The dashboard loads artifacts and does no feature engineering of its own.
+Every number on screen is read from `metrics.json` rather than stored in the app, because the app's own copies had already fallen out of step with both the metadata and this README.
+
+### Reproducibility
+
+`python -m src.train` goes from raw files to models and metrics in one go.
+I added upper bounds to the dependencies after a pandas 3 upgrade silently broke two feature builders that nothing outside a notebook imported.
+
+The tree models come back identical from the seed.
+TensorFlow on CPU does not, so the LSTM moves by roughly a point of R2 between environments, which I would rather write down than ignore.
+
+### Tests and CI
+
+A pytest suite over the data and feature layer (running on every push on github actions as well).
+
+The RUL definitions for both splits, engine boundaries in the lag and window features, whether the split is disjoint and deterministic, and a leakage test that mutates the held out engines and checks that nothing the pipeline learned moves.
+Warnings fail the build, since the pandas deprecation that broke everything had been printing quietly into a notebook for two releases while I ignored it.
+
+Model training stays out of CI, and the tests that check training and serving agree skip themselves when there is nothing trained to check.
+
+---
+
+## What I Would Do Next
+
+Evaluating on the official FD001 test split, and reporting RMSE and the NASA score, would make these results comparable with published CMAPSS work. My internal split answers a slightly different question.
+
+Cross validation over engine folds is the obvious gap. Fifteen test engines is not enough to separate the top three models with any confidence.
+
+FD002 and FD004 introduce multiple operating conditions, which would need condition-aware normalisation rather than the single global scaler I use here.
+
+Drift monitoring would be cheap to add. The pipeline already stores the training min and max, so an input distribution wandering away from it is measurable, and right now nothing measures it.
+
+---
+
+## Dashboard
 
 ```bash
-cd notebooks
-jupyter notebook 01_eda_cmapss.ipynb
+streamlit run webapp/dashboard.py
 ```
 
-Notebooks should be run in numerical order as they build upon previous work.
+| Page | What it shows |
+|------|---------------|
+| Overview | Held out scores, and which model answers which question |
+| New Prediction | CSV upload or manual sensor entry, with intervals and SHAP |
+| Engine Analysis | One engine, all models, survival curve, sensor traces |
+| Model Comparison | Validation against test, and the gap between them |
+| Fleet Management | Risk ranking and maintenance priority across the fleet |
+| Performance Metrics | Residual distributions, cost and interpretability trade-offs |
+| Workflow | The pipeline, and what was wrong with the first version |
 
----
-
-## Dataset
-
-**NASA CMAPSS (C-MAPSS1, C-MAPSS2, etc.)**
-
-* Simulated turbofan engine degradation datasets.
-* Includes **multivariate time-series sensor readings** for multiple engines until failure.
-* Provides an excellent benchmark for **RUL prediction**, enabling both **supervised regression** and **survival analysis** experiments.
-
----
-
-## Why These Insights Matter
-
-1. **Operational Efficiency**: Accurate RUL prediction allows maintenance teams to **schedule repairs just in time**, avoiding both unnecessary inspections and catastrophic failures.
-2. **Safety Assurance**: Early detection of engine degradation reduces the risk of **in-flight failures**.
-3. **Data-Driven Insights**: Feature importance and survival curves could help engineers understand **which sensors are most critical** for monitoring engine health.
-
----
-
-## Tools & Libraries
-
-* **Data Handling & EDA**: `pandas`, `numpy`, `matplotlib`, `seaborn` – for cleaning, visualizing, and exploring sensor data.
-* **Statistical Survival Models**: `lifelines` – fit Weibull and Cox proportional hazards models to estimate engine failure probability over time.
-* **Machine Learning**: `scikit-learn` – Random Forests, Gradient Boosting, and Ridge Regression for RUL prediction.
-* **Deep Learning**: `TensorFlow / Keras` – LSTM and sequence models to capture temporal patterns in sensor readings.
-* **Explainability**: `SHAP` – feature attribution and model interpretation for transparency.
-* **Visualization & Dashboard**: `Streamlit`, `Plotly` – create interactive dashboards to explore engine health, feature importance, and RUL forecasts.
-* **Model Persistence**: `joblib` – save and load trained models and metadata.
-
----
-
-## 8-Week Project Pipeline
-
-### 1. Data Ingestion & Exploration
-
-* Load CMAPSS datasets using a custom loader.
-* Perform exploratory analysis to understand sensor ranges, distributions, and patterns.
-* **Why:** Before modeling, it’s crucial to understand the dataset and identify trends, anomalies, and preprocessing needs.
-
-### 2. Feature Engineering
-
-* Generate rolling-window features (mean, std, min, max, trends) for each sensor.
-* Normalize sensor readings to handle scale differences.
-* **Why:** Time-series features capture degradation patterns that single-time-point values cannot.
-
-### 3. Baseline Models
-
-* Train **linear regression and simple ML models** for RUL prediction.
-* Evaluate baseline performance using MAE, RMSE, and R².
-* **Why:** Provides a reference point to compare more complex models.
-
-### 4. Machine Learning Models
-
-* Train **Random Forest and Gradient Boosting models** for RUL regression.
-* Analyze **feature importance** to identify which sensors most influence predictions.
-* **Why:** ML models capture nonlinear relationships and improve predictive accuracy over linear baselines.
-
-### 5. Survival Analysis
-
-* Fit **Weibull and Cox models** to estimate failure probabilities over time.
-* Produce survival curves for engines at different operational stages.
-* **Why:** Offers probabilistic insights into engine health and complements deterministic RUL predictions.
-
-### 6. Deep Learning Models
-
-* Build **LSTM-based sequence models** to capture temporal dependencies in sensor data.
-* Optionally explore **Transformer-based architectures** for improved long-range sequence modeling.
-* **Why:** Temporal deep learning models can exploit sequential patterns in degradation that simpler models may miss.
-
-### 7. Dashboard & Visualization
-
-* Deploy a **Streamlit dashboard** to:
-
-  * Display predicted RUL for individual engines.
-  * Plot survival curves and prediction intervals.
-  * Visualize sensor importance and trends.
-* **Why:** Makes predictive insights **accessible and actionable** for project stakeholders, even without engineering experience.
-
----
-
-## Expected Outcomes
-
-* **High-quality RUL predictions** with benchmarked performance across linear, ML, and deep learning models.
-* **Interpretability insights** via feature importance and survival analysis.
-* **Interactive dashboard** for exploring engine health and predictive maintenance schedules.
-* **Real-time prediction capability** for new sensor data with confidence intervals.
-* **SHAP explainability** showing which sensors drive each prediction.
-* **Ensemble model** combining LSTM (45%), Gradient Boosting (35%), and Random Forest (20%).
-* **Industry benchmark comparison** demonstrating competitive performance.
-* Reproducible, modular pipeline that can be extended to other turbofan datasets or industrial equipment in real-life scenarios.
-
----
-
-## Evaluation Metrics
-
-* **RUL Regression**:
-
-  * Mean Absolute Error (MAE)
-  * Root Mean Squared Error (RMSE)
-  * R² Score
-  * Stratified evaluation by short-, medium-, and long-term horizons.
-* **Failure Probability (Survival Analysis)**:
-
-  * Survival curves
-  * Predicted probability of failure over time
-* **Uncertainty Estimates**:
-
-  * 95% confidence intervals via empirical bootstrapping
-  * Ensemble-based uncertainty quantification
-
-* **Model Interpretability**:
-
-  * SHAP values for feature attribution
-  * Individual model contributions (ensemble)
-  * Risk-based maintenance recommendations
-
----
-
-## Key Features
-
-### Real-Time Predictions
-- Upload CSV files with sensor readings
-- Manual sensor entry for quick predictions
-- Process multiple engines simultaneously
-
-### Advanced Analytics
-- **Ensemble Model**: Weighted combination of LSTM, Gradient Boosting, and Random Forest
-- **Prediction Intervals**: 95% confidence bounds for uncertainty quantification
-- **SHAP Explainability**: Top 5 influential sensors for each prediction
-- **Survival Analysis**: Weibull and Cox models for failure probability estimation
-
-### Interactive Visualizations
-- Sensor trend charts over engine lifetime
-- Survival probability curves
-- Model performance comparisons
-- Fleet-wide risk assessment
-- Industry benchmark comparisons
-
-### Maintenance Recommendations
-- Risk-based classification (Critical, Warning, Healthy)
-- Actionable maintenance schedules
-- Priority-based engine ranking
-
----
-
-## Model Performance
-
-| Model | R² Score | MAE (cycles) | Type |
-|-------|----------|--------------|------|
-| Ensemble | 0.82 | 13.2 | Weighted Average |
-| LSTM | 0.8198 | 13.55 | Deep Learning |
-| Gradient Boosting | 0.7999 | 15.8 | Tree Ensemble |
-| Random Forest | 0.7989 | 16.2 | Tree Ensemble |
-| Ridge | 0.7854 | 26.1 | Linear |
-| Weibull AFT | - | 15.8 | Survival (C-index: 0.85) |
-| Cox PH | - | 17.2 | Survival (C-index: 0.804) |
-
-**Ensemble Weights:**
-- LSTM: 45% (based on R² = 0.8198)
-- Gradient Boosting: 35% (based on R² = 0.7999)
-- Random Forest: 20% (based on R² = 0.7989)
-
----
-
----
-
-## Dashboard Showcase
-
-The interactive dashboard provides real-time insights into engine health, model performance, and fleet-wide risk assessment.
+The evaluation pages show only the held out engines.
+They used to run on the full featured file, which meant most of what I was scoring and ranking was training data being presented as though it were not.
 
 ![System Overview](docs/screenshots/01-overview.png)
 
-The Overview page displays key system metrics and model performance comparisons at a glance.
-
 ![New Prediction](docs/screenshots/02-new-prediction.png)
-
-Generate predictions for new engine data through CSV upload or manual sensor entry, with confidence intervals and feature importance analysis.
 
 ![Engine Analysis](docs/screenshots/03-engine-analysis.png)
 
-Analyze individual engines with detailed RUL predictions from all models, survival probability curves, and maintenance recommendations.
-
 ![Model Comparison](docs/screenshots/04-model-comparison.png)
-
-Compare model performance metrics and identify the best model for specific use cases.
 
 ![Fleet Management](docs/screenshots/05-fleet-management.png)
 
-Assess fleet-wide risk distribution and prioritize maintenance scheduling across all engines.
-
 ![Performance Metrics](docs/screenshots/06-performance-metrics.png)
 
-View detailed performance analysis with model trade-offs, radar charts, and error analysis.
+![Workflow](docs/screenshots/07-workflow.png)
 
+---
+
+## Repository Layout
+
+```
+data/bronze/     raw CMAPSS files, tracked, never written to
+data/silver/     cleaned sensor cycles
+data/gold/       engineered and normalised feature matrix
+data/models/     models, fitted transformers, split, metrics
+
+src/             the pipeline
+notebooks/       the narrative: EDA, modelling, survival, deep learning
+webapp/          Streamlit dashboard
+tests/           pytest suite
+```
+
+## Notebooks
+
+The notebooks are where my reasoning lives; `src/train.py` is the part that reproduces.
+They run the same pipeline and read the same split and pipeline artifacts, so they cannot quietly disagree with it any more.
+
+| Notebook | Contents |
+|----------|----------|
+| `01_eda_cmapss` | Sensor distributions, correlations, degradation traces |
+| `02_preprocessing` | Cleaning, and which sensors get dropped and why |
+| `02.5_feature_engineering` | Rolling, lag, trend and EWMA features, with plots |
+| `03-04_machine_learning_models` | Split, baselines, tree models, test evaluation |
+| `05_survival_analysis` | Landmark design, Weibull AFT and Cox PH |
+| `06_deep_learning` | LSTM on sequences, compared on the same split |
+
+## Dataset
+
+NASA CMAPSS, FD001 subset: 100 engines under a single operating condition and a single fault mode.
+Each engine starts with some unknown amount of initial wear and runs to failure, giving 21 sensor channels and 3 operational settings, one row per cycle.
+
+FD002 and FD004 add multiple operating conditions, which is why they are on my future work list rather than in the repo: a single global scaler is the wrong tool for them.
+
+## Tools
+
+`pandas` and `numpy` for data handling, `scikit-learn` for the tree and linear models, `TensorFlow` for the LSTM, `lifelines` for survival analysis, `SHAP` for explanations, `Streamlit` and `Plotly` for the dashboard, and `pytest` for the tests.

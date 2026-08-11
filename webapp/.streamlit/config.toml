@@ -6,10 +6,15 @@ textColor = "#262730"
 font = "sans serif"
 
 [client]
-showErrorDetails = false
-maxUploadSize = 200
+# Show tracebacks. This runs locally as a demo, and hiding the error detail
+# only makes a broken artifact look like an empty page.
+showErrorDetails = true
 
 [server]
+# Sensor CSVs for a full fleet are a few MB, so the default 200 is plenty.
+# There was a duplicate of this under [client], which is not a valid option
+# there and made Streamlit warn on every start.
 maxUploadSize = 200
-enableCORS = false
-enableXsrfProtection = true
+# enableCORS = false was set here alongside enableXsrfProtection = true.
+# Those two are incompatible, so Streamlit silently forced CORS back on and
+# printed a warning. Leaving both at their secure defaults instead.

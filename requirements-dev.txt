@@ -1,0 +1,5 @@
+# Development and CI dependencies.
+# Install the runtime requirements first: pip install -r requirements.txt
+-r requirements.txt
+
+pytest>=8.0,<9.0
